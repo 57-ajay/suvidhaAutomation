@@ -1,0 +1,69 @@
+services:
+  redis-pivot:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_pivot_data:/data
+    networks: [pivot]
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      REDIS_URL: "redis://redis-pivot:6379"
+      PIPELINE_TAG: "pivot-a"
+      REQUEST_DOC_PATH_TEMPLATE: "${REQUEST_DOC_PATH_TEMPLATE:-driverUtilities/data/bordertaxRequests/{requestId}}"
+      GCS_BUCKET: "${GCS_BUCKET}"
+      GCS_PREFIX: "${GCS_PREFIX:-driverUtilitiesRequests/borderTaxRequests}"
+      QR_VALIDITY_DAYS: "${QR_VALIDITY_DAYS:-7}"
+      CAPTCHA_URL_TTL_SECONDS: "${CAPTCHA_URL_TTL_SECONDS:-180}"
+      FIREBASE_SERVICE_ACCOUNT: "${FIREBASE_SERVICE_ACCOUNT:-}"
+      GOOGLE_APPLICATION_CREDENTIALS: "${GOOGLE_APPLICATION_CREDENTIALS:-}"
+    volumes:
+      - ${SERVICE_ACCOUNT_HOST_PATH:-/dev/null}:/secrets/sa.json:ro
+    depends_on: [redis-pivot]
+    networks: [pivot]
+
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    shm_size: "4gb"
+    environment:
+      REDIS_URL: "redis://redis-pivot:6379"
+      API_URL: "http://api:3000"
+      DOMAIN: "${DOMAIN:-pivot.automation-agent.cabswale.in}"
+      MAX_SLOTS: "${MAX_SLOTS:-3}"
+      MAX_USER_CAPTCHA_ATTEMPTS: "${MAX_USER_CAPTCHA_ATTEMPTS:-3}"
+      AUTO_CLEAR_PENDING: "${AUTO_CLEAR_PENDING:-false}"
+      CAPTCHA_WAIT_SECS: "${CAPTCHA_WAIT_SECS:-300}"
+      QR_WAIT_SECS: "${QR_WAIT_SECS:-360}"
+      PAYMENT_VERIFY_SECS: "${PAYMENT_VERIFY_SECS:-120}"
+      EGRESS_PROXY: "${EGRESS_PROXY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      AI_MODEL: "${AI_MODEL:-gemini-3.5-flash}"
+    depends_on: [api, redis-pivot]
+    networks: [pivot]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, worker]
+    networks: [pivot]
+
+volumes:
+  redis_pivot_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  pivot:
+    driver: bridge

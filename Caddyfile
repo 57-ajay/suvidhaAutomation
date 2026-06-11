@@ -1,0 +1,37 @@
+# Caddyfile — pivot-a subdomain
+#
+# Subdomain routing (recommended over path routing): no /api path-stripping, and
+# the noVNC websocket upgrade at /websockify just works. Point your `pivot.` DNS
+# A record at this host and Caddy will provision TLS automatically.
+
+{$DOMAIN:pivot.automation-agent.cabswale.in} {
+	encode gzip
+
+	# API.
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	# noVNC live view + websocket. websockify serves the static noVNC under / and
+	# upgrades /websockify; reverse_proxy streams the upgrade through unchanged.
+	handle /websockify* {
+		reverse_proxy worker:6080
+	}
+	handle /vnc.html* {
+		reverse_proxy worker:6080
+	}
+	handle /core/* {
+		reverse_proxy worker:6080
+	}
+	handle /app/* {
+		reverse_proxy worker:6080
+	}
+	handle /vendor/* {
+		reverse_proxy worker:6080
+	}
+
+	# Everything else -> noVNC root.
+	handle {
+		reverse_proxy worker:6080
+	}
+}
