@@ -1,0 +1,53 @@
+services:
+  redis-pivot:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-pivot-data:/data
+    networks:
+      - internal
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis-pivot:6379
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/service.json
+    volumes:
+      - ${SERVICE_ACCOUNT_FILE:-./service.json}:/secrets/service.json:ro
+    depends_on:
+      - redis-pivot
+    networks:
+      internal:
+      proxy:
+        aliases:
+          - pivot-api
+    # ports: ["3000:3000"]
+
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis-pivot:6379
+      API_URL: http://api:3000
+    shm_size: "2gb"
+    depends_on:
+      - redis-pivot
+      - api
+    networks:
+      internal:
+      proxy:
+        aliases:
+          - pivot-worker
+    # ports: ["6080:6080"]
+
+networks:
+  internal:
+  proxy:
+    external: true
+
+volumes:
+  redis-pivot-data:

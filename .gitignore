@@ -1,0 +1,10 @@
+node_modules/
+bun.lockb
+.venv/
+__pycache__/
+*.pyc
+.env
+service.json
+*.log
+.DS_Store
+*.json
