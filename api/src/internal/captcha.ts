@@ -14,6 +14,8 @@
 // worker submits to the portal -> captcha-result writes the verdict. On
 // "rejected" the worker refreshes, recaptures, and calls save-captcha again
 // with attempt+1. Exhaustion ends the run as `cancelled` (no money has moved).
+// stage:"pending" flips
+// pendingTransactionCaptcha instead of captchaSolving
 
 import { uploadBase64 } from "../lib/gcs";
 import { config } from "../config";
@@ -27,6 +29,7 @@ export interface SaveCaptchaInput {
     attempt: number; // 1-based
     maxAttempts?: number;
     waitSeconds?: number; // how long the worker will wait for the answer
+    stage?: "disclaimer" | "pending"; // which page -> which captcha status
 }
 
 export async function handleSaveCaptcha(input: SaveCaptchaInput) {
@@ -60,8 +63,12 @@ export async function handleSaveCaptcha(input: SaveCaptchaInput) {
         },
     });
 
+    const to_ =
+        input.stage === "pending"
+            ? STATUS.PENDING_TRANSACTION_CAPTCHA
+            : STATUS.CAPTCHA_SOLVING;
     // Self-transition on captchaSolving is legal, so repeat attempts are fine.
-    await setAgentStatus({ requestId, driverId, to: STATUS.CAPTCHA_SOLVING });
+    await setAgentStatus({ requestId, driverId, to: to_ });
 
     return { ok: true, url: up.url, attempt };
 }

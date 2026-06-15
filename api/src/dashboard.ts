@@ -112,6 +112,10 @@ function render(j){
     h += '<div class="wait">' + esc(j.waitReason) + '</div>';
 
   if ((waiting && j.captchaUrl && (j.agentStatus === 'captchaSolving')) || (j.qrCodeUrl && j.agentStatus === 'qrPaymentNeeded')) {
+    if (j.captchaUrl &&
+    (j.agentStatus === 'captchaSolving' || j.agentStatus === 'pendingTransactionCaptcha'))
+  h += '<figure><img class="cap" src="' + esc(j.captchaUrl) + '">'
+     + '<figcaption>captcha · attempt ' + esc(j.captchaAttempt || '1') + '</figcaption></figure>';
     h += '<div class="imgs">';
     if (j.captchaUrl && j.agentStatus === 'captchaSolving')
       h += '<figure><img class="cap" src="' + esc(j.captchaUrl) + '">'

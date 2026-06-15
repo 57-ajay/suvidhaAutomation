@@ -8,6 +8,8 @@
 //   queued                  -> validated + enqueued, waiting for a worker slot
 //   aiAgentStarted          -> worker picked it up; browser is filling the portal
 //   pendingTransaction      -> stuck in-flight tx found; auto-clear in progress
+//   pendingTransactionCaptcha -> pending-tx captcha shown to the user
+//                                  (only when AI is OFF or fell back)
 //   captchaSolving          -> captcha image pushed, waiting for the user's text
 //   settingUpPaymentRequest -> captcha accepted; driving gateway -> UPI
 //   qrPaymentNeeded         -> UPI QR pushed, waiting for the payment
@@ -22,6 +24,7 @@ export const STATUS = {
     QUEUED: "queued",
     AI_AGENT_STARTED: "aiAgentStarted",
     PENDING_TRANSACTION: "pendingTransaction",
+    PENDING_TRANSACTION_CAPTCHA: "pendingTransactionCaptcha",
     CAPTCHA_SOLVING: "captchaSolving",
     SETTING_UP_PAYMENT_REQUEST: "settingUpPaymentRequest",
     QR_PAYMENT_NEEDED: "qrPaymentNeeded",
@@ -50,12 +53,14 @@ const ALLOWED: Record<Status, Status[]> = {
     [STATUS.QUEUED]: [STATUS.AI_AGENT_STARTED, STATUS.CANCELLED, STATUS.FAILED],
     [STATUS.AI_AGENT_STARTED]: [
         STATUS.PENDING_TRANSACTION,
+        STATUS.SETTING_UP_PAYMENT_REQUEST, // AI solved the disclaimer captcha silently
         STATUS.CAPTCHA_SOLVING,
         STATUS.CANCELLED,
     ],
     [STATUS.PENDING_TRANSACTION]: [STATUS.AI_AGENT_STARTED, STATUS.CANCELLED],
     [STATUS.CAPTCHA_SOLVING]: [
         STATUS.SETTING_UP_PAYMENT_REQUEST,
+        STATUS.PENDING_TRANSACTION_CAPTCHA, // human (or AI-fallback) pending captcha
         STATUS.CANCELLED,
     ],
     [STATUS.SETTING_UP_PAYMENT_REQUEST]: [
@@ -76,6 +81,14 @@ const ALLOWED: Record<Status, Status[]> = {
         STATUS.GENERATING_RECEIPT,
         STATUS.COMPLETED,
         STATUS.FAILED,
+    ],
+    // pendingTransactionCaptcha is PRE-PAYMENT: a stop here is always cancelled.
+    // -> pendingTransaction once accepted (the bank-icon clear is progress),
+    // -> aiAgentStarted on the open_portal restart after a successful clear.
+    [STATUS.PENDING_TRANSACTION_CAPTCHA]: [
+        STATUS.PENDING_TRANSACTION,
+        STATUS.AI_AGENT_STARTED,
+        STATUS.CANCELLED,
     ],
     [STATUS.GENERATING_RECEIPT]: [STATUS.COMPLETED, STATUS.FAILED],
     [STATUS.COMPLETED]: [],

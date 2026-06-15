@@ -9,6 +9,7 @@
 //   cancelledDetails                  (on cancelled)
 //   receiptDocumentUrl                (on completed)
 //   status (top-level, terminal only) + statusUpdateHistory append
+//   nextRequestAllowed                (on failed/cancelled — driver block)
 //
 // Everything else (amount, partnerDetails, vehicleDetails, processType,
 // aiProcessTriggered, …) is written by other CabsWale services and is never
@@ -17,7 +18,7 @@
 //
 // Timestamps are ISO strings with the +05:30 offset to match the existing DS.
 
-import { db } from "../firebase";
+import { db, FieldValue } from "../firebase";
 import { requestDocPath } from "../config";
 import {
     type Status,
@@ -35,6 +36,25 @@ export function isoIST(d: Date = new Date()): string {
         `${ist.getUTCFullYear()}-${p(ist.getUTCMonth() + 1)}-${p(ist.getUTCDate())}` +
         `T${p(ist.getUTCHours())}:${p(ist.getUTCMinutes())}:${p(ist.getUTCSeconds())}+05:30`
     );
+}
+
+// ─── Driver re-request blocking ───────────────────────────────────────────
+// On any non-completed terminal the doc gets a root-level nextRequestAllowed
+// (isoIST, like every other timestamp here). The app/backend enforces it; we
+// only write. Discriminator mirrors main's driverUsage logic — the ground
+// truth is whether a QR ever reached the driver:
+//   QR generated, payment not made -> now + 45 minutes
+//   no QR (docs invalid / portal blocked / abandoned earlier) -> next IST midnight
+const QR_NO_PAYMENT_BLOCK_MS = 45 * 60 * 1000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+export function nextISTMidnight(from: Date = new Date()): Date {
+    const ist = new Date(from.getTime() + IST_OFFSET_MS);
+    const nextMidnightISTAsUTC = Date.UTC(
+        ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + 1,
+        0, 0, 0, 0,
+    );
+    return new Date(nextMidnightISTAsUTC - IST_OFFSET_MS);
 }
 
 function docRef(requestId: string, driverId: string) {
@@ -65,33 +85,37 @@ export interface SetStatusOpts {
 /**
  * FSM-guarded status write, done in a transaction so concurrent writers can't
  * race past the guard. Merges; never clobbers sibling aiAgentData fields.
+ * Every write also appends {from, to, at} to aiAgentData.statusHistory — the
+ * append-only timeline the client can render per requestId.
  */
 export async function setAgentStatus(opts: SetStatusOpts): Promise<Status> {
     const { requestId, driverId, to } = opts;
     const ref = docRef(requestId, driverId);
 
     await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const cur = snap.get("aiAgentData.status");
+        const from: Status = isStatus(cur) ? cur : STATUS.QUEUED;
         if (!opts.force) {
-            const snap = await tx.get(ref);
-            const cur = snap.get("aiAgentData.status");
-            const from: Status = isStatus(cur) ? cur : STATUS.QUEUED;
             assertTransition(from, to);
         }
+        const now = isoIST();
         const aiAgentData: Record<string, unknown> = {
             status: to,
-            statusUpdatedAt: isoIST(),
+            statusUpdatedAt: now,
+            statusHistory: FieldValue.arrayUnion({ from, to, at: now }),
             ...(opts.source ? { source: opts.source } : {}),
             ...(opts.error !== undefined
                 ? {
-                      error: {
-                          isError: opts.error != null,
-                          message: opts.error ?? "",
-                      },
-                  }
+                    error: {
+                        isError: opts.error != null,
+                        message: opts.error ?? "",
+                    },
+                }
                 : {}),
             ...(opts.extra ?? {}),
         };
-        tx.set(ref, { aiAgentData, updatedAt: isoIST() }, { merge: true });
+        tx.set(ref, { aiAgentData, updatedAt: now }, { merge: true });
     });
 
     return to;
@@ -154,6 +178,7 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
         const aiAgentData: Record<string, unknown> = {
             status: to,
             statusUpdatedAt: now,
+            statusHistory: FieldValue.arrayUnion({ from, to, at: now }),
             ...(opts.source ? { source: opts.source } : {}),
             error: { isError: opts.error != null, message: opts.error ?? "" },
             paymentCompleted: opts.paymentCompleted ?? to === STATUS.COMPLETED,
@@ -198,6 +223,15 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
                 cancelledBy: "ai_agent",
                 reason: opts.error ?? opts.summary ?? "cancelled before payment",
             };
+        }
+        if (to !== STATUS.COMPLETED) {
+            const hasQR = !!(
+                snap.get("aiAgentData.qrCode.url") ?? snap.get("qrCodeUrl")
+            );
+            const unblockAt = hasQR
+                ? new Date(Date.now() + QR_NO_PAYMENT_BLOCK_MS)
+                : nextISTMidnight();
+            topLevel.nextRequestAllowed = isoIST(unblockAt);
         }
 
         tx.set(ref, topLevel, { merge: true });

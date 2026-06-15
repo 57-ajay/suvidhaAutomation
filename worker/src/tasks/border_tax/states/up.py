@@ -35,6 +35,12 @@ import asyncio
 import json
 import time
 
+from config import (
+    CAPTCHA_WAIT_SECS,
+    MAX_USER_CAPTCHA_ATTEMPTS,
+    PAYMENT_VERIFY_SECS,
+    QR_WAIT_SECS,
+)
 from engine.pipeline import Phase
 from engine.steps import (
     abort_if_popup_text,
@@ -63,9 +69,10 @@ from engine.types import (
     StepStatus,
 )
 from lifecycle.status import Status
+from redis_client import job_key
 
 from .. import pending_clear
-from ..captcha_user import solve_user_captcha
+from ..captcha_user import solve_captcha
 from ..extract_amount import extract_and_save_border_tax_amount
 from ..payment_wait import (
     DEFAULT_POSITIVE_PATTERNS,
@@ -658,9 +665,44 @@ async def tax_info(ctx: RunContext) -> None:
     await fill(
         ctx.session, SEL_TAX_FROM, p.taxFrom, log=ctx.log, name="p5.fill_tax_from"
     )
-    await fill(
-        ctx.session, SEL_TAX_UPTO, p.taxUpto, log=ctx.log, name="p5.fill_tax_upto"
-    )
+
+    if p.fills_tax_upto:
+        await fill(
+            ctx.session, SEL_TAX_UPTO, p.taxUpto, log=ctx.log, name="p5.fill_tax_upto"
+        )
+    else:
+        # MONTHLY/QUARTERLY/YEARLY: the portal computes and locks Tax Upto
+        # from Tax From + mode. Writing it would override that value behind
+        # the UI lock, so we don't touch it — we read it back for the record.
+        await sleep_seconds(1.0, log=ctx.log, name="p5.wait_auto_tax_upto")
+        portal_upto = await cdp_eval(
+            ctx.session,
+            "(function(s){"
+            "var els=Array.prototype.slice.call(document.querySelectorAll(s))"
+            "  .filter(function(e){var r=e.getBoundingClientRect();"
+            "          return r.width>0 && r.height>0;});"
+            "return els.length ? els[els.length-1].value : '';"
+            "})(" + json.dumps(SEL_TAX_UPTO) + ")",
+        )
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name="p5.tax_upto_auto_filled",
+                status=StepStatus.OK,
+                selector=SEL_TAX_UPTO,
+                value=f"portal set {portal_upto!r} for {p.taxMode}"
+                + (
+                    " (client-sent taxUpto ignored by design)"
+                    if str(getattr(p, "taxUpto", "")).strip()
+                    else ""
+                ),
+            )
+        )
+        if portal_upto:
+            try:
+                ctx.r.hset(job_key(ctx.job_id), "portalTaxUpto", str(portal_upto))
+            except Exception:
+                pass
     await sleep_seconds(1.0, log=ctx.log, name="p5.pre_calc_settle")
 
     await click_by_text(
@@ -747,7 +789,7 @@ async def disclaimer_captcha(ctx: RunContext) -> None:
         low = txt.lower()
         return "captcha" in low and ("invalid" in low or "mismatch" in low)
 
-    await solve_user_captcha(
+    await solve_captcha(
         ctx,
         input_selector=SEL_CAPTCHA_INPUT,
         refresh_selector=SEL_CAPTCHA_REFRESH,
@@ -819,18 +861,28 @@ async def payment(ctx: RunContext) -> RunOutcome:
 # pending-clear restart (pendingTransaction -> aiAgentStarted) is legal;
 # captchaSolving flips API-side with save-captcha; qrPaymentNeeded with
 # save-qr — image and status land together for the client.
+# Per-phase deadlines: portal-only phases get tight budgets; the two
+# human-wait phases derive theirs from the configured wait windows so a
+# config bump never trips the pipeline watchdog.
 PHASES: list[Phase] = [
-    Phase("open_portal", open_portal, enter_status=Status.AI_AGENT_STARTED),
-    Phase("select_service", select_service),
-    Phase("owner_info", owner_info),
-    Phase("vehicle_info", vehicle_info),
-    Phase("tax_info", tax_info),
-    Phase("disclaimer_captcha", disclaimer_captcha),
+    Phase(
+        "open_portal", open_portal, enter_status=Status.AI_AGENT_STARTED, max_secs=150
+    ),
+    Phase("select_service", select_service, max_secs=150),
+    Phase("owner_info", owner_info, max_secs=420),  # incl. pending-clear
+    Phase("vehicle_info", vehicle_info, max_secs=180),
+    Phase("tax_info", tax_info, max_secs=180),
+    Phase(
+        "disclaimer_captcha",
+        disclaimer_captcha,
+        max_secs=MAX_USER_CAPTCHA_ATTEMPTS * CAPTCHA_WAIT_SECS + 180,
+    ),
     Phase(
         "payment_gateway",
         payment_gateway,
         enter_status=Status.SETTING_UP_PAYMENT_REQUEST,
+        max_secs=150,
     ),
-    Phase("sbiepay_upi", sbiepay_upi),
-    Phase("payment", payment),
+    Phase("sbiepay_upi", sbiepay_upi, max_secs=150),
+    Phase("payment", payment, max_secs=QR_WAIT_SECS + PAYMENT_VERIFY_SECS + 300),
 ]

@@ -19,7 +19,7 @@ import threading
 import time
 
 import api_client
-from config import JOB_TTL, MAX_SLOTS
+from config import JOB_MAX_RUNTIME_SECS, JOB_TTL, MAX_SLOTS
 from lifecycle.status import PRE_PAYMENT, Status
 from redis_client import QUEUE_KEY, get_redis, job_key
 from slots import SlotPool, live_url
@@ -39,38 +39,50 @@ def finalize_orphan(job_id: str, r) -> None:
     pre = agent in PRE_PAYMENT or agent == ""
     user_cancel = job.get("status") == "cancelled"
     status = "cancelled" if pre else "failed"
-    payment_likely = agent in (Status.VERIFYING_PAYMENT,
-                               Status.GENERATING_RECEIPT)
+    payment_likely = agent in (Status.VERIFYING_PAYMENT, Status.GENERATING_RECEIPT)
 
     if user_cancel and pre:
         summary = "cancelled by user before payment"
     elif user_cancel:
-        summary = ("cancelled by user during the payment window — verify "
-                   "with the bank before retrying")
+        summary = (
+            "cancelled by user during the payment window — verify "
+            "with the bank before retrying"
+        )
     elif pre:
         summary = "the agent stopped unexpectedly before payment"
     else:
-        summary = ("the agent stopped unexpectedly during the payment "
-                   "window — reconcile manually")
+        summary = (
+            "the agent stopped unexpectedly during the payment "
+            "window — reconcile manually"
+        )
 
-    r.hset(key, mapping={
-        "status": status,
-        "agentStatus": Status.CANCELLED if status == "cancelled"
-        else Status.FAILED,
-        "result": summary,
-        "error": summary,
-    })
+    r.hset(
+        key,
+        mapping={
+            "status": status,
+            "agentStatus": Status.CANCELLED if status == "cancelled" else Status.FAILED,
+            "result": summary,
+            "error": summary,
+        },
+    )
     r.hdel(key, "waitReason", "humanInput")
     r.expire(key, JOB_TTL)
 
     request_id = job.get("requestId", job_id)
     driver_id = job.get("driverId", "")
     try:
-        resp = asyncio.run(api_client.job_completed(
-            job_id=job_id, request_id=request_id, driver_id=driver_id,
-            status=status, source=job.get("source", "app"), summary=summary,
-            error=summary, payment_likely=payment_likely,
-        ))
+        resp = asyncio.run(
+            api_client.job_completed(
+                job_id=job_id,
+                request_id=request_id,
+                driver_id=driver_id,
+                status=status,
+                source=job.get("source", "app"),
+                summary=summary,
+                error=summary,
+                payment_likely=payment_likely,
+            )
+        )
         if resp.get("ok"):
             r.hset(key, "terminalApplied", "1")
     except Exception as e:
@@ -91,24 +103,41 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
             time.sleep(1.0)
 
     try:
-        r.hset(key, mapping={
-            "liveUrl": live_url(job_id),
-            "slotIndex": str(slot.index),
-        })
+        r.hset(
+            key,
+            mapping={
+                "liveUrl": live_url(job_id),
+                "slotIndex": str(slot.index),
+            },
+        )
         proc = subprocess.Popen(
-            [sys.executable, os.path.join(SRC_DIR, "run_job.py"),
-             job_id, slot.display],
+            [sys.executable, os.path.join(SRC_DIR, "run_job.py"), job_id, slot.display],
             cwd=SRC_DIR,
             env={**os.environ, "DISPLAY": slot.display},
         )
 
         graced_at: float | None = None
+        started_at = time.monotonic()
+        hard_deadline = JOB_MAX_RUNTIME_SECS + 120  # run_job's own ceiling + grace
         while proc.poll() is None:
+            if time.monotonic() - started_at > hard_deadline:
+                print(
+                    f"[main] job {job_id} exceeded the hard deadline "
+                    f"({hard_deadline}s); terminating wedged subprocess"
+                )
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                break
             if r.hget(key, "status") == "cancelled":
                 if graced_at is None:
                     graced_at = time.monotonic()
-                    print(f"[main] cancel requested for {job_id}; "
-                          f"{CANCEL_GRACE_SECS}s grace for a clean exit")
+                    print(
+                        f"[main] cancel requested for {job_id}; "
+                        f"{CANCEL_GRACE_SECS}s grace for a clean exit"
+                    )
                 elif time.monotonic() - graced_at > CANCEL_GRACE_SECS:
                     print(f"[main] grace expired; terminating {job_id}")
                     proc.terminate()
@@ -127,8 +156,7 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
 def main() -> None:
     r = get_redis()
     pool = SlotPool(MAX_SLOTS)
-    print(f"[main] border-tax worker up — {MAX_SLOTS} slots, "
-          f"queue '{QUEUE_KEY}'")
+    print(f"[main] border-tax worker up — {MAX_SLOTS} slots, queue '{QUEUE_KEY}'")
 
     while True:
         try:
@@ -147,7 +175,9 @@ def main() -> None:
 
         print(f"[main] picked up job {job_id}")
         threading.Thread(
-            target=handle_job, args=(job_id, pool, r), daemon=True,
+            target=handle_job,
+            args=(job_id, pool, r),
+            daemon=True,
         ).start()
 
 

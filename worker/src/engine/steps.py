@@ -44,9 +44,14 @@ async def cdp_eval(session, expr: str):
         src = "(function(){" + body + "})()"
 
     cdp = await session.get_or_create_cdp_session()
-    result = await cdp.cdp_client.send.Runtime.evaluate(
-        params={"expression": src, "returnByValue": True, "awaitPromise": True},
-        session_id=cdp.session_id,
+    # Bounded so a wedged browser can't hang a poll loop forever; callers'
+    # retry/except paths treat it like any other failed evaluation.
+    result = await asyncio.wait_for(
+        cdp.cdp_client.send.Runtime.evaluate(
+            params={"expression": src, "returnByValue": True, "awaitPromise": True},
+            session_id=cdp.session_id,
+        ),
+        timeout=30,
     )
     if isinstance(result, dict):
         exc = result.get("exceptionDetails")
@@ -131,9 +136,12 @@ async def navigate(
     started = time.monotonic()
     try:
         cdp = await session.get_or_create_cdp_session()
-        await cdp.cdp_client.send.Page.navigate(
-            params={"url": url},
-            session_id=cdp.session_id,
+        await asyncio.wait_for(
+            cdp.cdp_client.send.Page.navigate(
+                params={"url": url},
+                session_id=cdp.session_id,
+            ),
+            timeout=30,
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

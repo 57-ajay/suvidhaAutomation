@@ -39,6 +39,7 @@ on both sides.
 | `queued` | validated, waiting for a slot | "starting…" |
 | `aiAgentStarted` | browser is filling the portal | progress |
 | `pendingTransaction` | clearing a stuck in-flight tx (gated) | progress |
+| `pendingTransactionCaptcha` | **user input needed** to clear a pending tx (AI off / fell back) | captcha UI |
 | `captchaSolving` | **user input needed** — see `aiAgentData.captcha` | captcha UI |
 | `settingUpPaymentRequest` | captcha accepted, reaching the gateway | progress |
 | `qrPaymentNeeded` | **user payment needed** — see `aiAgentData.qrCode` | QR + pay |

@@ -32,12 +32,34 @@ PAYMENT_VERIFY_SECS = int(os.environ.get("PAYMENT_VERIFY_SECS", "120"))
 # Angular apps; giving them a beat between actions avoids racing re-renders.
 STEP_DELAY_SECS = float(os.environ.get("STEP_DELAY_SECS", "0.8"))
 
+# Hard ceiling for one job, end to end. Covers the worst legitimate path
+# (pending-clear + restart + 3 captcha attempts + full payment window) with
+# headroom; anything past it is a wedged run, terminated by the money-line
+# rule. The orchestrator hard-kills the subprocess at this + 120s grace.
+JOB_MAX_RUNTIME_SECS = int(os.environ.get("JOB_MAX_RUNTIME_SECS", "2400"))
+
 # User-solved captcha attempts before a hard cancel (no money has moved).
 MAX_USER_CAPTCHA_ATTEMPTS = int(os.environ.get("MAX_USER_CAPTCHA_ATTEMPTS", "3"))
+
 
 # Pending-transaction auto-clear (Vertex-OCR background captcha). OFF by
 # default: a pending transaction then cancels with a clear retry message.
 AUTO_CLEAR_PENDING = _bool("AUTO_CLEAR_PENDING", "false")
+
+
+# Captcha solving policy (global). "ai" tries Vertex OCR first and SILENTLY
+# (no captcha image uploaded, no captcha status written) and falls back to the
+# human seam only if OCR exhausts MAX_AI_CAPTCHA_ATTEMPTS. "human" goes straight
+# to the user. Redis-overridable later; env-only for now.
+def _captcha_mode() -> str:
+    m = os.environ.get("CAPTCHA_MODE", "ai").strip().lower()
+    return m if m in ("ai", "human") else "ai"
+
+
+CAPTCHA_MODE = _captcha_mode()
+
+# Silent OCR attempts before falling back to a human (ai / fallback path).
+MAX_AI_CAPTCHA_ATTEMPTS = int(os.environ.get("MAX_AI_CAPTCHA_ATTEMPTS", "5"))
 
 # Vertex AI (the only LLM path; ADC via the GCE metadata server — no key file).
 VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "cabswale-ai")

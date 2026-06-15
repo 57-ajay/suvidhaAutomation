@@ -21,7 +21,7 @@ import traceback
 
 import api_client
 from browser_config import build_browser_session
-from config import JOB_TTL
+from config import JOB_MAX_RUNTIME_SECS, JOB_TTL
 from engine.log import StepLogger
 from engine.pipeline import run_phases
 from engine.types import RunContext, RunOutcome, ScriptedAbort
@@ -78,7 +78,7 @@ async def amain(job_id: str, display: str) -> None:
         await reporter.set_status(Status.AI_AGENT_STARTED)
 
         session = build_browser_session(display)
-        await session.start()
+        await asyncio.wait_for(session.start(), timeout=90)
 
         ctx = RunContext(
             session=session,
@@ -88,7 +88,26 @@ async def amain(job_id: str, display: str) -> None:
             r=r,
             job_id=job_id,
         )
-        outcome = await run_phases(phases, ctx)
+        # Global ceiling on top of the per-phase deadlines: whatever happens,
+        # this job ends. Terminal follows the money-line rule below.
+        outcome = await asyncio.wait_for(
+            run_phases(phases, ctx), timeout=JOB_MAX_RUNTIME_SECS
+        )
+    except asyncio.TimeoutError:
+        pre = reporter.current in PRE_PAYMENT
+        msg = (
+            f"the run exceeded the {JOB_MAX_RUNTIME_SECS // 60}-minute "
+            f"limit and was stopped"
+            + ("" if pre else " during the payment flow — reconcile")
+        )
+        outcome = RunOutcome(
+            status="cancelled" if pre else "failed",
+            summary=msg,
+            error=msg,
+            payment_likely=reporter.current
+            in (Status.VERIFYING_PAYMENT, Status.GENERATING_RECEIPT),
+            run_log=log.dump(),
+        )
     except ScriptedAbort as e:
         status = "cancelled" if e.terminal == "cancelled" else "failed"
         outcome = RunOutcome(

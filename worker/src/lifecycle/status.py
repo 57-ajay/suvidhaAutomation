@@ -12,6 +12,7 @@ class Status:
     QUEUED = "queued"
     AI_AGENT_STARTED = "aiAgentStarted"
     PENDING_TRANSACTION = "pendingTransaction"
+    PENDING_TRANSACTION_CAPTCHA = "pendingTransactionCaptcha"
     CAPTCHA_SOLVING = "captchaSolving"
     SETTING_UP_PAYMENT_REQUEST = "settingUpPaymentRequest"
     QR_PAYMENT_NEEDED = "qrPaymentNeeded"
@@ -29,6 +30,7 @@ PRE_PAYMENT = {
     Status.QUEUED,
     Status.AI_AGENT_STARTED,
     Status.PENDING_TRANSACTION,
+    Status.PENDING_TRANSACTION_CAPTCHA,
     Status.CAPTCHA_SOLVING,
 }
 
@@ -37,9 +39,19 @@ _ALLOWED: dict[str, set[str]] = {
     Status.AI_AGENT_STARTED: {
         Status.PENDING_TRANSACTION,
         Status.CAPTCHA_SOLVING,
+        Status.SETTING_UP_PAYMENT_REQUEST,
         Status.CANCELLED,
     },
-    Status.PENDING_TRANSACTION: {Status.AI_AGENT_STARTED, Status.CANCELLED},
+    Status.PENDING_TRANSACTION: {
+        Status.AI_AGENT_STARTED,
+        Status.PENDING_TRANSACTION_CAPTCHA,
+        Status.CANCELLED,
+    },
+    Status.PENDING_TRANSACTION_CAPTCHA: {
+        Status.PENDING_TRANSACTION,
+        Status.AI_AGENT_STARTED,
+        Status.CANCELLED,
+    },
     Status.CAPTCHA_SOLVING: {
         Status.SETTING_UP_PAYMENT_REQUEST,
         Status.CANCELLED,

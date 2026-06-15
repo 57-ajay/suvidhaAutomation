@@ -18,7 +18,6 @@ _REQUIRED = (
     "state",
     "taxMode",
     "taxFrom",
-    "taxUpto",
     "entryDistrict",
 )
 
@@ -41,9 +40,22 @@ class BorderTaxParams:
     permitTypeFallback: str
     serviceType: str
 
+    @property
+    def fills_tax_upto(self) -> bool:
+        """True only for DAYS mode — for MONTHLY/QUARTERLY/YEARLY the portal
+        computes and locks Tax Upto itself, and writing it would override
+        the portal's value behind the UI lock."""
+        return self.taxMode.strip().upper() == "DAYS"
+
     @classmethod
     def from_job(cls, raw: dict) -> "BorderTaxParams":
         missing = [k for k in _REQUIRED if not str(raw.get(k, "")).strip()]
+        # taxUpto is part of the contract only in DAYS mode.
+        if (
+            str(raw.get("taxMode", "")).strip().upper() == "DAYS"
+            and not str(raw.get("taxUpto", "")).strip()
+        ):
+            missing.append("taxUpto")
         if missing:
             raise ScriptedAbort(
                 "internal error: job reached the worker without validated "
@@ -60,7 +72,7 @@ class BorderTaxParams:
             paymentMethod=str(raw.get("paymentMethod", "UPI")),
             taxMode=str(raw["taxMode"]),
             taxFrom=str(raw["taxFrom"]),
-            taxUpto=str(raw["taxUpto"]),
+            taxUpto=str(raw.get("taxUpto", "")),
             entryDistrict=str(raw["entryDistrict"]),
             entryCheckpoint=str(raw.get("entryCheckpoint", "")),
             permitType=str(raw.get("permitType", "TEMPORARY PERMIT")),

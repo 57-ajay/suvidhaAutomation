@@ -91,6 +91,28 @@ def _any_pattern(patterns: list[str], text: str) -> str | None:
     return None
 
 
+def _find_with_snippet(patterns: list[str], text: str) -> tuple[str, str] | None:
+    """(pattern, human snippet) for the first match. The snippet is the
+    matched text plus a little context, whitespace-collapsed — THIS is what
+    goes into user-facing errors; the regex itself stays in the run log."""
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            s, e = max(0, m.start() - 30), min(len(text), m.end() + 50)
+            snippet = re.sub(r"\s+", " ", text[s:e]).strip()
+            return p, snippet
+    return None
+
+
+# The SBI page prints its reference while we poll ("SBI Reference number
+# CPAGVGRTP3") — scrape it opportunistically so even failures carry a
+# transaction_id the ops side can reconcile against the bank.
+_SBI_REF_RX = re.compile(
+    r"SBI\s*Reference\s*(?:number|no)\.?\s*:?\s*([A-Z0-9]{6,})",
+    re.IGNORECASE,
+)
+
+
 def _receipt_ready(markers: list[str], text: str) -> bool:
     low = text.lower()
     return bool(markers) and all(m.lower() in low for m in markers)
@@ -202,6 +224,7 @@ async def wait_for_payment_and_capture(
 
     # ── Phase A: the QR window ─────────────────────────────────────────
     advance_reason: str | None = None
+    bank_ref: str | None = None
     deadline = time.monotonic() + config.payment_wait_secs + _FINAL_GRACE_SECS
     poll_n = 0
     while time.monotonic() < deadline:
@@ -217,30 +240,52 @@ async def wait_for_payment_and_capture(
             )
 
         text = await page_text(ctx.session)
+        if bank_ref is None:
+            m = _SBI_REF_RX.search(text)
+            if m:
+                bank_ref = m.group(1)
+                ctx.log.record(
+                    StepLog(
+                        index=ctx.log.next_index(),
+                        name="pay.sbi_reference",
+                        status=StepStatus.OK,
+                        value=bank_ref,
+                    )
+                )
 
         if _receipt_ready(config.receipt_markers, text):
             advance_reason = "receipt_markers"
             break
 
-        neg = _any_pattern(config.negative_patterns, text)
+        neg = _find_with_snippet(config.negative_patterns, text)
         if neg:
+            pattern, snippet = neg
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name="pay.negative_marker",
+                    status=StepStatus.FAILED,
+                    value=f"/{pattern}/",
+                    error=snippet,
+                )
+            )
             return RunOutcome(
                 status="failed",
                 summary=(
                     f"border tax payment for vehicle {p.vehicleNumber} "
                     f"entering {config.state_name} was NOT completed — the "
-                    f"portal reported the transaction as pending or failed "
-                    f"(the driver most likely did not complete the UPI "
-                    f"payment)"
+                    f"driver most likely did not complete the UPI payment"
+                    + (f" (SBI ref {bank_ref})" if bank_ref else "")
                 ),
-                error=f"negative payment marker: /{neg}/",
+                error=f'the bank page showed: "{snippet}"',
+                transaction_id=bank_ref,
                 payment_likely=False,
                 run_log=ctx.log.dump(),
             )
 
-        pos = _any_pattern(config.positive_patterns, text)
+        pos = _find_with_snippet(config.positive_patterns, text)
         if pos:
-            advance_reason = f"positive:/{pos}/"
+            advance_reason = f'positive: "{pos[1]}"'
             break
 
         if _consume_paid_input(ctx):
@@ -263,7 +308,8 @@ async def wait_for_payment_and_capture(
                 f"within {config.payment_wait_secs // 60} minutes — most "
                 f"likely the driver did not initiate the UPI payment"
             ),
-            error="payment_no_signal",
+            error="the payment window elapsed with no activity on the bank page",
+            transaction_id=bank_ref,
             payment_likely=False,
             run_log=ctx.log.dump(),
         )
@@ -303,20 +349,36 @@ async def wait_for_payment_and_capture(
         receipt_seen = False
         while time.monotonic() < verify_deadline:
             text = await page_text(ctx.session)
+            if bank_ref is None:
+                m = _SBI_REF_RX.search(text)
+                if m:
+                    bank_ref = m.group(1)
             if _receipt_ready(config.receipt_markers, text):
                 receipt_seen = True
                 break
-            neg = _any_pattern(config.negative_patterns, text)
+            neg = _find_with_snippet(config.negative_patterns, text)
             if neg:
+                pattern, snippet = neg
+                ctx.log.record(
+                    StepLog(
+                        index=ctx.log.next_index(),
+                        name="pay.negative_after_redirect",
+                        status=StepStatus.FAILED,
+                        value=f"/{pattern}/",
+                        error=snippet,
+                    )
+                )
                 return RunOutcome(
                     status="failed",
                     summary=(
                         f"border tax payment for vehicle {p.vehicleNumber} "
                         f"entering {config.state_name} was NOT completed — "
-                        f"after the QR page redirected, the portal reported "
-                        f"the transaction as pending or failed"
+                        f"after the QR page redirected, the portal still "
+                        f"reported no successful payment"
+                        + (f" (SBI ref {bank_ref})" if bank_ref else "")
                     ),
-                    error=f"negative marker after redirect: /{neg}/",
+                    error=f'the portal showed: "{snippet}"',
+                    transaction_id=bank_ref,
                     payment_likely=False,
                     run_log=ctx.log.dump(),
                 )
@@ -328,8 +390,10 @@ async def wait_for_payment_and_capture(
                 summary=(
                     "payment success was reported but the receipt page never "
                     "rendered — reconcile manually"
+                    + (f" (SBI ref {bank_ref})" if bank_ref else "")
                 ),
                 error="receipt page not reached after positive marker",
+                transaction_id=bank_ref,
                 payment_likely=True,
                 run_log=ctx.log.dump(),
             )
@@ -359,7 +423,7 @@ async def wait_for_payment_and_capture(
             "receiptNumber": raw.get("receiptNumber"),
             "amount": amount,
             "paymentDate": _date_to_iso(date_raw),
-            "bankRef": refs[0] if refs else None,
+            "bankRef": (refs[0] if refs else None) or bank_ref,
             "vehicleNumber": p.vehicleNumber,
         }
         ctx.log.record(
@@ -383,13 +447,16 @@ async def wait_for_payment_and_capture(
     pdf_b64: str | None = None
     try:
         cdp = await ctx.session.get_or_create_cdp_session()
-        resp = await cdp.cdp_client.send.Page.printToPDF(
-            params={
-                "landscape": False,
-                "printBackground": True,
-                "preferCSSPageSize": True,
-            },
-            session_id=cdp.session_id,
+        resp = await asyncio.wait_for(
+            cdp.cdp_client.send.Page.printToPDF(
+                params={
+                    "landscape": False,
+                    "printBackground": True,
+                    "preferCSSPageSize": True,
+                },
+                session_id=cdp.session_id,
+            ),
+            timeout=60,
         )
         pdf_b64 = (
             resp.get("data") if isinstance(resp, dict) else getattr(resp, "data", None)

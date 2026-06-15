@@ -32,26 +32,31 @@ import re
 import time
 
 from config import AUTO_CLEAR_PENDING
-from engine.canvas import wait_and_capture_canvas_png
+
+# from engine.canvas import wait_and_capture_canvas_png
 from engine.log import StepLogger
 from engine.steps import (
     cdp_eval,
     click_by_text,
-    current_url,
+    # current_url,
     fill,
     navigate,
     sleep_seconds,
     wait_for_selector,
 )
 from engine.types import RunContext, ScriptedAbort, StepLog, StepStatus
-from llm.vertex import ocr_image
-from redis_client import job_key
+
+# from llm.vertex import ocr_image
+# from redis_client import job_key
+from lifecycle.status import Status
+from .captcha_user import solve_captcha
 
 # ─── Selectors (live HTML, CheckPost V4.7.x — state-agnostic SPA shell) ─
 URL_PORTAL_HOME = "https://services.parivahan.gov.in/checkpostv4/#/"
 SEL_PENDING_TX_LINK = 'a[href="#/public/payment/ChecklTransactionStatus"]'
 SEL_PENDING_VEHICLE_INPUT = "input#inputVehicleNo"
 SEL_PENDING_CAPTCHA_CONTAINER = "div#captcha"
+SEL_PENDING_CAPTCHA_CANVAS = "div#captcha canvas"
 SEL_PENDING_CAPTCHA_INPUT = "input#inputcaptcha"
 # Refresh is a SIBLING of div#captcha (NOT a child).
 SEL_PENDING_CAPTCHA_REFRESH = "div#captcha + button, button.btn-primary.m-left"
@@ -292,56 +297,19 @@ async def _refresh_pending_captcha(ctx: RunContext) -> None:
     await asyncio.sleep(1.2)
 
 
-async def _solve_pending_captcha(ctx: RunContext) -> bool:
-    """Vertex-OCR the check-pending captcha, fill, click Go, classify.
-    True once the Go submit yields the results table."""
-    await asyncio.sleep(1.0)
-    for attempt in range(1, MAX_CAPTCHA_ATTEMPTS + 1):
-        b64, detail = await wait_and_capture_canvas_png(
-            ctx.session,
-            timeout=6.0,
-            tick=0.6,
-        )
-        if not b64:
-            ctx.log.record(
-                StepLog(
-                    index=ctx.log.next_index(),
-                    name="pending.captcha_capture",
-                    status=StepStatus.RETRIED,
-                    attempt=attempt,
-                    error=detail,
-                )
-            )
-            await _refresh_pending_captcha(ctx)
-            continue
+async def _solve_pending_captcha(ctx: RunContext) -> None:
+    """Solve the check-pending captcha under the global CAPTCHA_MODE. AI mode
+    OCRs it silently (no DB write, no captcha status); human / AI-fallback shows
+    it as pendingTransactionCaptcha. Raises ScriptedAbort(cancelled) if it
+    can't be solved (nothing irreversible has happened)."""
 
-        text, cost = await ocr_image(b64)
-        ctx.log.record(
-            StepLog(
-                index=ctx.log.next_index(),
-                name="pending.captcha_ocr",
-                status=StepStatus.OK if text != "UNREADABLE" else StepStatus.RETRIED,
-                attempt=attempt,
-                value=text,
-                ai_cost_usd=cost,
-            )
-        )
-        if text == "UNREADABLE":
-            await _refresh_pending_captcha(ctx)
-            continue
-
-        await fill(
-            ctx.session,
-            SEL_PENDING_CAPTCHA_INPUT,
-            text,
-            log=ctx.log,
-            name=f"pending.captcha_fill_{attempt}",
-        )
+    async def _submit() -> bool:
+        # Click Go, then poll the submit for the results table.
         try:
             await cdp_eval(
                 ctx.session,
                 "(function(s){var e=document.querySelector(s);"
-                "if(e){e.click(); return true;} return false;})("
+                "if(e){e.click();return true;}return false;})("
                 + json.dumps(SEL_PENDING_GO_BTN)
                 + ")",
             )
@@ -349,16 +317,14 @@ async def _solve_pending_captcha(ctx: RunContext) -> bool:
             ctx.log.record(
                 StepLog(
                     index=ctx.log.next_index(),
-                    name=f"pending.click_go_{attempt}",
+                    name="pending.click_go",
                     status=StepStatus.FAILED,
                     error=f"{type(e).__name__}: {e}",
                 )
             )
-            continue
+            return False
 
-        # Classify the Go submit: results / captcha_mismatch / pending.
         deadline = time.monotonic() + GO_SUBMIT_POLL_SECS
-        mismatch = False
         while time.monotonic() < deadline:
             res = await cdp_eval(ctx.session, _GO_SUBMIT_STATE_JS)
             state = (res or {}).get("state", "pending")
@@ -366,32 +332,31 @@ async def _solve_pending_captcha(ctx: RunContext) -> bool:
                 ctx.log.record(
                     StepLog(
                         index=ctx.log.next_index(),
-                        name=f"pending.go_submit_{attempt}",
+                        name="pending.go_submit",
                         status=StepStatus.OK,
                         value=f"results rows={res.get('count')}",
                     )
                 )
                 return True
             if state == "captcha_mismatch":
-                ctx.log.record(
-                    StepLog(
-                        index=ctx.log.next_index(),
-                        name=f"pending.go_submit_{attempt}",
-                        status=StepStatus.RETRIED,
-                        value=str(res.get("text", ""))[:120],
-                    )
-                )
-                mismatch = True
-                break
+                return False
             await asyncio.sleep(0.5)
+        return False  # neither results nor mismatch -> treat as not advanced
 
-        if mismatch:
-            await _dismiss_all(ctx, f"pending.dismiss_mismatch_{attempt}")
-            await _refresh_pending_captcha(ctx)
-            continue
-        # Neither results nor mismatch within budget: refresh and retry.
-        await _refresh_pending_captcha(ctx)
-    return False
+    async def _rejected() -> bool:
+        res = await cdp_eval(ctx.session, _GO_SUBMIT_STATE_JS)
+        return (res or {}).get("state") == "captcha_mismatch"
+
+    await solve_captcha(
+        ctx,
+        status=Status.PENDING_TRANSACTION_CAPTCHA,
+        stage="pending",
+        input_selector=SEL_PENDING_CAPTCHA_INPUT,
+        refresh_selector=SEL_PENDING_CAPTCHA_REFRESH,
+        submit_action=_submit,
+        is_rejected=_rejected,
+        canvas_scope=SEL_PENDING_CAPTCHA_CANVAS,
+    )
 
 
 # ─── Public: pending-tx clear flow ──────────────────────────────────────
@@ -469,8 +434,12 @@ async def clear_pending_transaction(ctx: RunContext) -> tuple[str, str]:
         name="pending.fill_vehicle",
     )
 
-    if not await _solve_pending_captcha(ctx):
-        return ("failed", f"captcha not accepted after {MAX_CAPTCHA_ATTEMPTS} attempts")
+    await _solve_pending_captcha(ctx)
+    if ctx.reporter.current == Status.PENDING_TRANSACTION_CAPTCHA:
+        await ctx.reporter.set_status(Status.PENDING_TRANSACTION)
+
+    # if not await _solve_pending_captcha(ctx):
+    #     return ("failed", f"captcha not accepted after {MAX_CAPTCHA_ATTEMPTS} attempts")
 
     res = await cdp_eval(ctx.session, _CLICK_BANK_ICON_JS)
     if not res or not res.get("ok"):
