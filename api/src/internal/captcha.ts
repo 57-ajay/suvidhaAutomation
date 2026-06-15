@@ -19,7 +19,7 @@
 
 import { uploadBase64 } from "../lib/gcs";
 import { config } from "../config";
-import { patchAiAgentData, setAgentStatus, isoIST } from "./requestDoc";
+import { patchAiAgentData, setAgentStatus, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 
 export interface SaveCaptchaInput {
@@ -48,7 +48,7 @@ export async function handleSaveCaptcha(input: SaveCaptchaInput) {
     });
 
     const deadline = input.waitSeconds
-        ? isoIST(new Date(Date.now() + input.waitSeconds * 1000))
+        ? ts(new Date(Date.now() + input.waitSeconds * 1000))
         : null;
 
     await patchAiAgentData(requestId, driverId, {
@@ -57,7 +57,7 @@ export async function handleSaveCaptcha(input: SaveCaptchaInput) {
             attempt,
             maxAttempts: input.maxAttempts ?? null,
             lastResult: "awaiting_input",
-            uploadedAt: isoIST(),
+            uploadedAt: ts(),
             inputDeadline: deadline,
             resultAt: null,
         },
@@ -90,7 +90,7 @@ export async function handleCaptchaResult(input: CaptchaResultInput) {
     }
 
     await patchAiAgentData(requestId, driverId, {
-        captcha: { lastResult: result, attempt, resultAt: isoIST() },
+        captcha: { lastResult: result, attempt, resultAt: ts() },
     });
 
     return { ok: true };

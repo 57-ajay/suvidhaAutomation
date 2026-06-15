@@ -7,7 +7,7 @@
 //   "partial"   -> failed     (payment likely succeeded but a post-payment step
 //                              failed — reconcile, never a silent success)
 
-import { applyTerminal, saveAgentCost } from "./requestDoc";
+import { applyTerminal, saveAgentCost, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 
 export interface JobCompletedInput {
@@ -36,7 +36,7 @@ export async function handleJobCompleted(input: JobCompletedInput) {
             costSource: "scripted_aggregate",
             entryCount: 1,
             jobId,
-            savedAt: new Date().toISOString(),
+            savedAt: ts(),
             source: input.source ?? "app",
             totalCachedCost: 0,
             totalCachedTokens: 0,
@@ -57,8 +57,8 @@ export async function handleJobCompleted(input: JobCompletedInput) {
         input.status === "done"
             ? STATUS.COMPLETED
             : input.status === "cancelled"
-              ? STATUS.CANCELLED
-              : STATUS.FAILED;
+                ? STATUS.CANCELLED
+                : STATUS.FAILED;
 
     try {
         await applyTerminal({

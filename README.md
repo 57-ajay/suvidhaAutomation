@@ -73,6 +73,11 @@ Doc: `driverUtilitiesRequests/data/borderTaxRequests/{requestId}`
 Everything else (`amount`, `partnerDetails`, `vehicleDetails`, `processType`,
 `aiProcessTriggered`, …) belongs to other services and is never touched.
 
+Note: that all timestamp fields under
+aiAgentData (and statusUpdateHistory[].at, cancelledDetails.cancelledAt,
+agentCost.savedAt, top-level updatedAt) are now Firestore Timestamp,
+read on the client with .toDate() / .toMillis().
+
 **Captcha handling in the app** — one listener on the doc is enough:
 
 ```

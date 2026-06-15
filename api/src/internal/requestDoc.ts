@@ -16,9 +16,8 @@
 // touched here. All writes are merges; the doc is created if a request arrives
 // before the client wrote it.
 //
-// Timestamps are ISO strings with the +05:30 offset to match the existing DS.
 
-import { db, FieldValue } from "../firebase";
+import { db, FieldValue, Timestamp } from "../firebase";
 import { requestDocPath } from "../config";
 import {
     type Status,
@@ -28,6 +27,12 @@ import {
     STATUS,
     TOP_LEVEL_STATUS,
 } from "../lifecycle/statuses";
+
+/** Firestore Timestamp for `d` (default: now). Use this for everything we
+ *  persist. No IST shift — a Timestamp is an absolute instant. */
+export function ts(d: Date = new Date()): Timestamp {
+    return Timestamp.fromDate(d);
+}
 
 export function isoIST(d: Date = new Date()): string {
     const ist = new Date(d.getTime() + 5.5 * 3600_000);
@@ -102,7 +107,7 @@ export async function setAgentStatus(opts: SetStatusOpts): Promise<Status> {
         const now = isoIST();
         const aiAgentData: Record<string, unknown> = {
             status: to,
-            statusUpdatedAt: now,
+            statusUpdatedAt: ts(),
             statusHistory: FieldValue.arrayUnion({ from, to, at: now }),
             ...(opts.source ? { source: opts.source } : {}),
             ...(opts.error !== undefined
@@ -115,7 +120,7 @@ export async function setAgentStatus(opts: SetStatusOpts): Promise<Status> {
                 : {}),
             ...(opts.extra ?? {}),
         };
-        tx.set(ref, { aiAgentData, updatedAt: now }, { merge: true });
+        tx.set(ref, { aiAgentData, updatedAt: ts() }, { merge: true });
     });
 
     return to;
@@ -128,7 +133,7 @@ export async function patchAiAgentData(
     fields: Record<string, unknown>,
 ): Promise<void> {
     await docRef(requestId, driverId).set(
-        { aiAgentData: fields, updatedAt: isoIST() },
+        { aiAgentData: fields, updatedAt: ts() },
         { merge: true },
     );
 }
@@ -139,7 +144,7 @@ export async function saveAgentCost(
     agentCost: Record<string, unknown>,
 ): Promise<void> {
     await docRef(requestId, driverId).set(
-        { agentCost, updatedAt: isoIST() },
+        { agentCost, updatedAt: ts() },
         { merge: true },
     );
 }
@@ -165,7 +170,7 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
     const { requestId, driverId, to } = opts;
     if (!isTerminal(to)) throw new Error(`applyTerminal called with "${to}"`);
     const ref = docRef(requestId, driverId);
-    const now = isoIST();
+    const now = ts();
 
     await db.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -231,7 +236,7 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
             const unblockAt = hasQR
                 ? new Date(Date.now() + QR_NO_PAYMENT_BLOCK_MS)
                 : nextISTMidnight();
-            topLevel.nextRequestAllowed = isoIST(unblockAt);
+            topLevel.nextRequestAllowed = ts(unblockAt);
         }
 
         tx.set(ref, topLevel, { merge: true });

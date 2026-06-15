@@ -5,7 +5,7 @@
 
 import { uploadBase64 } from "../lib/gcs";
 import { config } from "../config";
-import { patchAiAgentData, isoIST } from "./requestDoc";
+import { patchAiAgentData, isoIST, ts } from "./requestDoc";
 
 export interface SaveReceiptInput {
     requestId: string;
@@ -41,10 +41,10 @@ export async function handleSaveReceipt(input: SaveReceiptInput) {
         receipt: {
             url: up.url,
             fields: input.fields ?? {},
-            uploadedAt: isoIST(),
+            uploadedAt: ts(),
         },
         receiptGenerated: true,
-        receiptGeneratedAt: isoIST(),
+        receiptGeneratedAt: ts(),
     });
 
     return { ok: true, url: up.url };

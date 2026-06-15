@@ -12,7 +12,7 @@ import {
     applicationDefault,
     type App,
 } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { config } from "./config";
 
@@ -23,8 +23,8 @@ function init(): App {
     const credential = inline
         ? cert(JSON.parse(inline))
         : keyPath
-          ? cert(keyPath)
-          : applicationDefault();
+            ? cert(keyPath)
+            : applicationDefault();
 
     return initializeApp({
         credential,
@@ -36,4 +36,4 @@ const app = init();
 
 export const db = getFirestore(app);
 export const bucket = getStorage(app).bucket();
-export { FieldValue };
+export { FieldValue, Timestamp };

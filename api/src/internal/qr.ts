@@ -7,7 +7,7 @@
 
 import { uploadBase64 } from "../lib/gcs";
 import { config } from "../config";
-import { patchAiAgentData, setAgentStatus, isoIST } from "./requestDoc";
+import { patchAiAgentData, setAgentStatus, isoIST, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 
 export interface SaveQRInput {
@@ -36,13 +36,14 @@ export async function handleSaveQR(input: SaveQRInput) {
             : undefined,
     });
 
-    const expiredAt = isoIST(new Date(Date.now() + ttlSeconds * 1000));
+    // const expiredAt = isoIST(new Date(Date.now() + ttlSeconds * 1000));
+    const expiresDate = new Date(Date.now() + ttlSeconds * 1000);
 
     await patchAiAgentData(requestId, driverId, {
         qrCode: {
             url: up.url,
-            uploadedAt: isoIST(),
-            expiredAt,
+            uploadedAt: ts(),
+            expiredAt: ts(expiresDate),
             notificationSent: false,
             notificationSentAt: null,
         },
@@ -50,5 +51,5 @@ export async function handleSaveQR(input: SaveQRInput) {
 
     await setAgentStatus({ requestId, driverId, to: STATUS.QR_PAYMENT_NEEDED });
 
-    return { ok: true, url: up.url, expiredAt };
+    return { ok: true, url: up.url, expiredAt: isoIST(expiresDate) };
 }
