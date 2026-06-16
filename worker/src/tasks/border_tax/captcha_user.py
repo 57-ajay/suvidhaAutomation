@@ -323,24 +323,18 @@ async def _solve_human_captcha(
 async def solve_captcha(
     ctx: RunContext,
     *,
-    status: str,
-    stage: str,
+    status: str | None = None,
+    stage: str | None = None,
     input_selector: str,
     refresh_selector: str,
     submit_action: Callable[[], Awaitable[bool]],
     is_rejected: Callable[[], Awaitable[bool]],
     canvas_scope: str | None = None,
     mode: str | None = None,
+    human_fallback: bool = True,  # NEW
+    terminal: str = "cancelled",  # NEW: terminal when the seam is exhausted
+    abort_message: str | None = None,  # NEW
 ) -> None:
-    """Solve one captcha page under the global CAPTCHA_MODE.
-
-    status  the captcha lifecycle status this page reports when a HUMAN solves
-            it (Status.CAPTCHA_SOLVING or Status.PENDING_TRANSACTION_CAPTCHA).
-    stage   "disclaimer" | "pending" — tells save-captcha which status to flip.
-    submit_action  everything to do AFTER the captcha text is typed; returns
-            True if the page advanced past the captcha.
-    is_rejected    True if the portal showed a captcha-mismatch.
-    Raises ScriptedAbort(cancelled) only after the human seam is exhausted."""
     mode = (mode or CAPTCHA_MODE).lower()
 
     if mode == "ai":
@@ -353,8 +347,12 @@ async def solve_captcha(
             canvas_scope=canvas_scope,
         ):
             return
-        # OCR exhausted — clear any leftover popup and hand to the user.
         await dismiss_popup(ctx.session, log=ctx.log, name="captcha.ai_handoff")
+        if not human_fallback:
+            raise ScriptedAbort(
+                abort_message or "couldn't read the captcha within the AI budget",
+                terminal=terminal,
+            )
 
     await _solve_human_captcha(
         ctx,

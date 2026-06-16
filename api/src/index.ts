@@ -15,6 +15,7 @@ import {
 import { handleInternal } from "./routes/internal";
 import { supportedStates } from "./validators";
 import { DASHBOARD_HTML } from "./dashboard";
+import { handleVerifyPending } from "./routes/verifyPending";
 
 const server = Bun.serve({
     port: config.port,
@@ -44,6 +45,9 @@ const server = Bun.serve({
             }
             if (req.method === "POST" && p === "/api/run") {
                 return await handleRun(req);
+            }
+            if (req.method === "POST" && p === "/api/verify-pending") {
+                return handleVerifyPending(req);
             }
             if (req.method === "GET" && p === "/api/dashboard") {
                 return new Response(DASHBOARD_HTML, {

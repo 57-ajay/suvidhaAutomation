@@ -55,14 +55,19 @@ DEFAULT_NEGATIVE_PATTERNS = [
     # SBI ePay Lite Remittance Information Form (QR expired without payment)
     r"transaction\s*status\s*[:\-]?\s*pending",
     r"your\s*transaction\s*status\s*is\s*pending",
-    # Parivahan post-redirect after SBI pending
-    r"transaction\s*confirmation\s*pending",
+    # (REMOVED: transaction confirmation pending -> now a park trigger)
     r"transaction\s*status\s*[:\-]?\s*failed",
     r"transaction\s*failed",
     r"payment\s*failed",
 ]
-
 _FINAL_GRACE_SECS = 6
+
+# The Parivahan post-SBI redirect ("Transaction confirmation pending at the
+# bank side"). Ambiguous — money may or may not have moved — so we PARK at
+# verifyingPendingPayment instead of failing, and the verify job reconciles.
+DEFAULT_PENDING_VERIFY_PATTERNS = [
+    r"transaction\s*confirmation\s*pending",
+]
 
 
 @dataclass
@@ -78,10 +83,44 @@ class PaymentCaptureConfig:
     negative_patterns: list[str] = field(
         default_factory=lambda: list(DEFAULT_NEGATIVE_PATTERNS)
     )
+    pending_verify_patterns: list[str] = field(
+        default_factory=lambda: list(DEFAULT_PENDING_VERIFY_PATTERNS)
+    )
     payment_wait_secs: int = QR_WAIT_SECS
     verify_phase_secs: int = PAYMENT_VERIFY_SECS
     poll_interval_secs: float = 3.0
     marker_poll_secs: float = 2.0
+
+
+async def _park_for_verify(
+    ctx: RunContext, *, snippet: str, bank_ref: str | None
+) -> RunOutcome:
+    """Pending-confirmation screen hit. Flip verifyingPendingPayment (Firestore
+    write via the reporter) and end the run as `parked` — run_job records it
+    without a terminal, and the backend's sweeper later calls the verify API."""
+    await ctx.reporter.set_status(
+        Status.VERIFYING_PENDING_PAYMENT,
+        error="bank-side confirmation pending — queued for verification",
+    )
+    ctx.log.record(
+        StepLog(
+            index=ctx.log.next_index(),
+            name="pay.park_for_verify",
+            status=StepStatus.HANDED_OFF,
+            value=snippet,
+        )
+    )
+    return RunOutcome(
+        status="parked",
+        summary=(
+            "the bank hasn't confirmed the payment yet — we'll verify it and "
+            "send your receipt as soon as it clears"
+        ),
+        error=f'portal showed: "{snippet}"',
+        transaction_id=bank_ref,
+        payment_likely=True,  # genuinely unknown; lean toward "might have paid"
+        run_log=ctx.log.dump(),
+    )
 
 
 def _any_pattern(patterns: list[str], text: str) -> str | None:
@@ -257,6 +296,10 @@ async def wait_for_payment_and_capture(
             advance_reason = "receipt_markers"
             break
 
+        pend = _find_with_snippet(config.pending_verify_patterns, text)
+        if pend:
+            return await _park_for_verify(ctx, snippet=pend[1], bank_ref=bank_ref)
+
         neg = _find_with_snippet(config.negative_patterns, text)
         if neg:
             pattern, snippet = neg
@@ -356,6 +399,11 @@ async def wait_for_payment_and_capture(
             if _receipt_ready(config.receipt_markers, text):
                 receipt_seen = True
                 break
+
+            pend = _find_with_snippet(config.pending_verify_patterns, text)
+            if pend:
+                return await _park_for_verify(ctx, snippet=pend[1], bank_ref=bank_ref)
+
             neg = _find_with_snippet(config.negative_patterns, text)
             if neg:
                 pattern, snippet = neg
@@ -399,8 +447,18 @@ async def wait_for_payment_and_capture(
             )
 
     # ── Phase C: extract, print, upload ────────────────────────────────
+    return await capture_and_upload_receipt(ctx, config=config, bank_ref=bank_ref)
+
+
+async def capture_and_upload_receipt(
+    ctx: RunContext, *, config: PaymentCaptureConfig, bank_ref: str | None = None
+) -> RunOutcome:
+    """Phase C, standalone: set generatingReceipt, extract fields, printToPDF,
+    save-receipt (retries). Returns done / partial. Used by the normal payment
+    flow AND the verify-pending job once a receipt is on screen."""
     await ctx.reporter.set_status(Status.GENERATING_RECEIPT)
     await sleep_seconds(1.5, log=ctx.log, name="receipt.settle")
+    p = ctx.params
 
     fields: dict = {}
     try:

@@ -48,6 +48,7 @@ on both sides.
 | `completed` | receipt uploaded (terminal) | success + receipt |
 | `cancelled` | stopped **before any money moved** (terminal, retryable) | reason + retry |
 | `failed` | payment attempted/unconfirmed (terminal) → `manualReview` | "we're on it" |
+| `verifyingPendingPayment` | parked — bank-side confirmation pending, awaiting the verify sweep | progress / "confirming…" |
 
 Money rule: through `captchaSolving` every stop is `cancelled`; from
 `settingUpPaymentRequest` onward a stop is `failed`/reconcile — never a

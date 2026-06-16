@@ -30,7 +30,9 @@ class StepLog(BaseModel):
 
 
 class RunOutcome(BaseModel):
-    # done | cancelled | failed | partial
+    # done | cancelled | failed | partial | parked
+    #   parked -> the run set verifyingPendingPayment and exited; NOT terminal,
+    #   the verify job will resolve it later. run_job skips applyTerminal.
     status: str
     summary: str
     error: str | None = None
@@ -52,8 +54,9 @@ class ScriptedAbort(Exception):
       "failed"    — money may have moved; the API flips manualReview.
     """
 
-    def __init__(self, message: str, *, terminal: str = "cancelled",
-                 reason: str | None = None):
+    def __init__(
+        self, message: str, *, terminal: str = "cancelled", reason: str | None = None
+    ):
         super().__init__(message)
         self.message = message
         self.terminal = terminal
@@ -76,9 +79,9 @@ class RunContext:
     forward; the final phase sets `outcome` (or returns it)."""
 
     session: Any  # browser_use BrowserSession
-    params: Any   # tasks.border_tax.params.BorderTaxParams
+    params: Any  # tasks.border_tax.params.BorderTaxParams
     reporter: Any  # lifecycle.reporter.StatusReporter
-    log: Any      # engine.log.StepLogger
-    r: Any        # redis client
+    log: Any  # engine.log.StepLogger
+    r: Any  # redis client
     job_id: str
     scratch: dict = field(default_factory=dict)

@@ -73,9 +73,22 @@ async def amain(job_id: str, display: str) -> None:
     try:
         params = BorderTaxParams.from_job(params_raw)
         phases = resolve_phases(params.state)
+        task = job.get("task", "borderTax")
 
-        # Flip before the ~5s browser boot so the client sees pickup fast.
-        await reporter.set_status(Status.AI_AGENT_STARTED)
+        if task == "verifyPendingPayment":
+            from tasks.border_tax.verify_pending import VerifyPendingParams
+            from tasks.border_tax.registry import resolve_verify_phases
+
+            params = VerifyPendingParams.from_job(params_raw)
+            phases = resolve_verify_phases(params.state)
+            # The request is already verifyingPendingPayment (set at park).
+            # Seed the local cursor so the FSM guard lets us go to
+            # generatingReceipt / failed without re-asserting it.
+            reporter.sync_local(Status.VERIFYING_PENDING_PAYMENT)
+        else:
+            params = BorderTaxParams.from_job(params_raw)
+            phases = resolve_phases(params.state)
+            await reporter.set_status(Status.AI_AGENT_STARTED)
 
         session = build_browser_session(display)
         await asyncio.wait_for(session.start(), timeout=90)
@@ -146,6 +159,74 @@ async def amain(job_id: str, display: str) -> None:
         )[:50_000]
     except Exception:
         run_log_json = "[]"
+
+    if outcome.status == "parked":
+        r.hset(
+            key,
+            mapping={
+                "status": "parked",
+                "agentStatus": Status.VERIFYING_PENDING_PAYMENT,
+                "result": (outcome.summary or "")[:2000],
+                "error": (outcome.error or "")[:2000],
+                "totalCostUsd": f"{outcome.total_cost_usd:.6f}",
+                "runLog": run_log_json,
+            },
+        )
+        r.hdel(key, "waitReason", "humanInput")
+        r.expire(key, JOB_TTL)
+        # Firestore status was already set to verifyingPendingPayment by the
+        # reporter. job-completed(parked) saves cost only — no applyTerminal.
+        resp = await api_client.job_completed(
+            job_id=job_id,
+            request_id=request_id,
+            driver_id=driver_id,
+            status="parked",
+            source=source,
+            summary=outcome.summary,
+            error=outcome.error,
+            payment_likely=outcome.payment_likely,
+            cost_data={"totalCost": round(outcome.total_cost_usd, 6)},
+        )
+        if resp.get("ok"):
+            r.hset(
+                key, "terminalApplied", "1"
+            )  # this worker closed itself; reaper skips
+        print(f"[run_job] job={job_id} -> parked (verifyingPendingPayment)")
+        return
+
+    if outcome.status == "parked":
+        r.hset(
+            key,
+            mapping={
+                "status": "parked",
+                "agentStatus": Status.VERIFYING_PENDING_PAYMENT,
+                "result": (outcome.summary or "")[:2000],
+                "error": (outcome.error or "")[:2000],
+                "totalCostUsd": f"{outcome.total_cost_usd:.6f}",
+                "runLog": run_log_json,
+            },
+        )
+        r.hdel(key, "waitReason", "humanInput")
+        r.expire(key, JOB_TTL)
+        # Firestore status was already set to verifyingPendingPayment by the
+        # reporter. job-completed(parked) saves cost only — no applyTerminal.
+        resp = await api_client.job_completed(
+            job_id=job_id,
+            request_id=request_id,
+            driver_id=driver_id,
+            status="parked",
+            source=source,
+            summary=outcome.summary,
+            error=outcome.error,
+            payment_likely=outcome.payment_likely,
+            cost_data={"totalCost": round(outcome.total_cost_usd, 6)},
+        )
+        if resp.get("ok"):
+            r.hset(
+                key, "terminalApplied", "1"
+            )  # this worker closed itself; reaper skips
+        print(f"[run_job] job={job_id} -> parked (verifyingPendingPayment)")
+        return
 
     r.hset(
         key,

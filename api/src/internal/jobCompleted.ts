@@ -14,7 +14,7 @@ export interface JobCompletedInput {
     jobId: string;
     requestId: string;
     driverId: string;
-    status: "done" | "cancelled" | "failed" | "partial";
+    status: "done" | "cancelled" | "failed" | "partial" | "parked";
     source?: string;
     summary?: string;
     error?: string | null;
@@ -51,6 +51,12 @@ export async function handleJobCompleted(input: JobCompletedInput) {
         await saveAgentCost(requestId, driverId, agentCost).catch((e) =>
             console.error(`[jobCompleted] saveAgentCost failed: ${e.message}`),
         );
+    }
+
+    if (input.status === "parked") {
+        // Parked, not terminal. The reporter already wrote
+        // verifyingPendingPayment; we only persisted cost above. No applyTerminal.
+        return { ok: true, status: STATUS.VERIFYING_PENDING_PAYMENT };
     }
 
     const to =

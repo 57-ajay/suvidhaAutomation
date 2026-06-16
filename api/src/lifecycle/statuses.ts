@@ -29,6 +29,7 @@ export const STATUS = {
     SETTING_UP_PAYMENT_REQUEST: "settingUpPaymentRequest",
     QR_PAYMENT_NEEDED: "qrPaymentNeeded",
     VERIFYING_PAYMENT: "verifyingPayment",
+    VERIFYING_PENDING_PAYMENT: "verifyingPendingPayment",
     GENERATING_RECEIPT: "generatingReceipt",
     COMPLETED: "completed",
     CANCELLED: "cancelled",
@@ -48,7 +49,6 @@ export const TERMINAL_STATUSES: ReadonlySet<Status> = new Set([
 // refreshed QR). Any transition FROM a terminal state is rejected.
 //
 // Money line: everything up to captchaSolving can only end in `cancelled`;
-// from settingUpPaymentRequest onward a stop is `failed` (reconcile).
 const ALLOWED: Record<Status, Status[]> = {
     [STATUS.QUEUED]: [STATUS.AI_AGENT_STARTED, STATUS.CANCELLED, STATUS.FAILED],
     [STATUS.AI_AGENT_STARTED]: [
@@ -72,6 +72,7 @@ const ALLOWED: Record<Status, Status[]> = {
     // can pay so fast that the first decisive thing we poll is the receipt page.
     [STATUS.QR_PAYMENT_NEEDED]: [
         STATUS.VERIFYING_PAYMENT,
+        STATUS.VERIFYING_PENDING_PAYMENT,
         STATUS.GENERATING_RECEIPT,
         STATUS.FAILED,
     ],
@@ -79,7 +80,12 @@ const ALLOWED: Record<Status, Status[]> = {
     // crashed worker can still close the request.
     [STATUS.VERIFYING_PAYMENT]: [
         STATUS.GENERATING_RECEIPT,
+        STATUS.VERIFYING_PENDING_PAYMENT,
         STATUS.COMPLETED,
+        STATUS.FAILED,
+    ],
+    [STATUS.VERIFYING_PENDING_PAYMENT]: [
+        STATUS.GENERATING_RECEIPT,
         STATUS.FAILED,
     ],
     // pendingTransactionCaptcha is PRE-PAYMENT: a stop here is always cancelled.

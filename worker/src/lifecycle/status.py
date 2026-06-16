@@ -17,6 +17,7 @@ class Status:
     SETTING_UP_PAYMENT_REQUEST = "settingUpPaymentRequest"
     QR_PAYMENT_NEEDED = "qrPaymentNeeded"
     VERIFYING_PAYMENT = "verifyingPayment"
+    VERIFYING_PENDING_PAYMENT = "verifyingPendingPayment"
     GENERATING_RECEIPT = "generatingReceipt"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -64,11 +65,17 @@ _ALLOWED: dict[str, set[str]] = {
     Status.QR_PAYMENT_NEEDED: {
         Status.VERIFYING_PAYMENT,
         Status.GENERATING_RECEIPT,
+        Status.VERIFYING_PENDING_PAYMENT,
         Status.FAILED,
     },
     Status.VERIFYING_PAYMENT: {
         Status.GENERATING_RECEIPT,
+        Status.VERIFYING_PENDING_PAYMENT,
         Status.COMPLETED,
+        Status.FAILED,
+    },
+    Status.VERIFYING_PENDING_PAYMENT: {
+        Status.GENERATING_RECEIPT,
         Status.FAILED,
     },
     Status.GENERATING_RECEIPT: {Status.COMPLETED, Status.FAILED},
