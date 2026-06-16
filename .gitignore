@@ -8,3 +8,5 @@ service.json
 *.log
 .DS_Store
 *.json
+service*
+*.json

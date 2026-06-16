@@ -28,6 +28,16 @@ import {
 
 const VALID_TAX_MODES = new Set(["DAYS", "MONTHLY", "QUARTERLY", "YEARLY"]);
 
+
+function addDays(date: string, duration: number): string {
+    const [year, month, day] = date.split("-").map(Number);
+
+    const d = new Date(Date.UTC(year, month - 1, day));
+    d.setUTCDate(d.getUTCDate() + duration);
+
+    return d.toISOString().slice(0, 10);
+}
+
 const DEFAULTS = {
     mobileNumber: "",
     // Standard Delhi-NCR -> UP entry; change here if your fleet enters elsewhere.
@@ -47,9 +57,10 @@ export const upValidator: StateValidator = {
         const invalid: FieldError[] = [];
 
         const vehicleNumber = str(raw.vehicleNumber);
+        let duration = Number(raw.duration) || 0;
         const taxMode = str(raw.taxMode)?.toUpperCase();
         const taxFrom = normalizeDate(raw.taxFrom);
-        const taxUpto = normalizeDate(raw.taxUpto);
+        let taxUpto = normalizeDate(raw.taxUpto);
         const paymentMethod = str(raw.paymentMethod)?.toUpperCase();
         const requestId = str(raw.requestId);
         const driverId = str(raw.driverId);
@@ -70,12 +81,14 @@ export const upValidator: StateValidator = {
         // taxUpto only matters in DAYS mode; otherwise the portal owns it.
         const needsTaxUpto = taxMode === "DAYS";
         if (needsTaxUpto && !taxUpto) {
-            if (str(raw.taxUpto)) {
-                invalid.push({
-                    field: "taxUpto",
-                    reason: "expected YYYY-MM-DD or dd/Mon/yyyy",
-                });
-            } else missing.push("taxUpto");
+            if (duration === 1) { taxUpto = taxFrom! }
+            else {
+                taxUpto = addDays(taxFrom!, duration - 1);
+            }
+        }
+
+        if (!taxUpto) {
+            taxUpto = taxFrom;
         }
 
         if (vehicleNumber && !isVehicleNumber(vehicleNumber)) {

@@ -43,7 +43,7 @@ async def ocr_image(
         from google.genai import types as gt
 
         client = genai.Client(
-            vertexai=True, project=VERTEX_PROJECT, location=VERTEX_LOCATION,
+            vertexai=True, project=VERTEX_PROJECT, 
         )
         resp = await client.aio.models.generate_content(
             model=LLM_MODEL,
