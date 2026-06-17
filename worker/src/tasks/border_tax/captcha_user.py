@@ -36,6 +36,7 @@ from config import (
     CAPTCHA_WAIT_SECS,
     MAX_AI_CAPTCHA_ATTEMPTS,
     MAX_USER_CAPTCHA_ATTEMPTS,
+    CAPTCHA_DEBUG_DIR,
 )
 from engine.canvas import wait_and_capture_canvas_png
 from engine.steps import cdp_eval, dismiss_popup, fill
@@ -83,7 +84,24 @@ async def _capture_readable(
             tick=0.6,
             scope_selector=scope,
         )
+
         if b64:
+            if CAPTCHA_DEBUG_DIR:
+                try:
+                    import base64 as _b64, os as _os
+                    _os.makedirs(CAPTCHA_DEBUG_DIR, exist_ok=True)
+                    _p = _os.path.join(
+                        CAPTCHA_DEBUG_DIR,
+                        f"captcha_{ctx.job_id}_{int(time.time() * 1000)}.png",
+                    )
+                    with open(_p, "wb") as _f:
+                        _f.write(_b64.b64decode(b64))
+                    ctx.log.record(StepLog(
+                        index=ctx.log.next_index(), name="captcha.debug_dump",
+                        status=StepStatus.OK, value=_p,
+                    ))
+                except Exception:
+                    pass
             ctx.log.record(
                 StepLog(
                     index=ctx.log.next_index(),
@@ -94,6 +112,17 @@ async def _capture_readable(
                 )
             )
             return b64
+        # if b64:
+        #     ctx.log.record(
+        #         StepLog(
+        #             index=ctx.log.next_index(),
+        #             name="captcha.capture",
+        #             status=StepStatus.OK,
+        #             attempt=round_no,
+        #             value=detail,
+        #         )
+        #     )
+        #     return b64
         ctx.log.record(
             StepLog(
                 index=ctx.log.next_index(),

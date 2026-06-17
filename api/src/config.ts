@@ -21,6 +21,7 @@ export const config = {
     gcsPrefix:
         process.env.GCS_PREFIX ?? "driverUtilitiesRequests/borderTaxRequests",
 
+    qrValidUpto: 2 * 60 + 50, // 170 seconds
     qrValidityDays: int("QR_VALIDITY_DAYS", 7),
     captchaUrlTtlSeconds: int("CAPTCHA_URL_TTL_SECONDS", 600),
 

@@ -68,3 +68,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-3-flash-preview")
 
 # Optional egress proxy that owns the IP allow-listed with .nic.in.
 EGRESS_PROXY = os.environ.get("EGRESS_PROXY", "").strip()
+
+# When set, every captcha image the worker captures is written here as PNG
+# (mount it as a volume, or `docker cp`, to retrieve). Debug only.
+CAPTCHA_DEBUG_DIR = os.environ.get("CAPTCHA_DEBUG_DIR", "").strip()

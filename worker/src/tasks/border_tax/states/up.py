@@ -93,6 +93,7 @@ SEL_SERVICE_TYPE = "select#floatingService"  # phase 4
 SEL_TAX_FROM = "input#floatingTaxfrom"  # lowercase 'f', from DOM
 SEL_TAX_UPTO = "input#uptpDate"  # portal's own typo, from DOM
 SEL_TAX_MODE_CANDIDATES = [
+    "select#floatingtaxmode",
     "select#floatingTaxMode",
     "select#floatingtaxmode",
     "select[name='taxmode']",
@@ -791,13 +792,14 @@ async def disclaimer_captcha(ctx: RunContext) -> None:
 
     await solve_captcha(
         ctx,
+        status=Status.CAPTCHA_SOLVING,
+        stage="disclaimer",
         input_selector=SEL_CAPTCHA_INPUT,
         refresh_selector=SEL_CAPTCHA_REFRESH,
         submit_action=submit,
         is_rejected=rejected,
-        canvas_container=None,  # probe scans the whole document
+        canvas_scope=None,   
     )
-
 
 async def payment_gateway(ctx: RunContext) -> None:
     await wait_for_selector(

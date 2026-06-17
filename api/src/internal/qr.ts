@@ -26,7 +26,7 @@ export async function handleSaveQR(input: SaveQRInput) {
         return { ok: false, error: "imageBase64 required" };
     }
 
-    const ttlSeconds = config.qrValidityDays * 24 * 60 * 60;
+    const ttlSeconds = config.qrValidUpto
     const up = await uploadBase64({
         base64: input.imageBase64,
         destination: `${requestId}_${driverId}/qr_code.png`,

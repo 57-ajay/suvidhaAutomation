@@ -70,8 +70,26 @@ def _probe_js(selector: str = "canvas") -> str:
     return out;
   }
   out.state = 'painted';
-  try { out.dataUrl = pick.toDataURL('image/png'); }
-  catch(e){ out.dataUrlError = String(e); }
+  try {
+    var SCALE = 4;
+    var big = document.createElement('canvas');
+    big.width = pick.width * SCALE;
+    big.height = pick.height * SCALE;
+    var bctx = big.getContext('2d');
+    // The captcha bitmap is dark glyphs on a TRANSPARENT background (the teal is
+    // CSS on the container, not in the canvas). Export as-is and Gemini flattens
+    // the alpha onto BLACK -> dark-on-black -> unreadable. Paint white first.
+    bctx.fillStyle = '#ffffff';
+    bctx.fillRect(0, 0, big.width, big.height);
+    bctx.imageSmoothingEnabled = true;
+    bctx.imageSmoothingQuality = 'high';
+    bctx.drawImage(pick, 0, 0, big.width, big.height);
+    out.dataUrl = big.toDataURL('image/png');
+    out.upscaled = SCALE;
+  } catch (e) {
+    try { out.dataUrl = pick.toDataURL('image/png'); }
+    catch (e2) { out.dataUrlError = String(e2); }
+  }
   return out;
 })()
 """ % (json.dumps(selector), _MIN_INK_PX)
