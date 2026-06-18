@@ -39,6 +39,8 @@ class BorderTaxParams:
     permitType: str
     permitTypeFallback: str
     serviceType: str
+    # HR fills #floatingDistance only when the RC left it empty; no price effect.
+    distance: str = "500"
 
     @property
     def fills_tax_upto(self) -> bool:
@@ -80,4 +82,5 @@ class BorderTaxParams:
                 raw.get("permitTypeFallback", "ALL INDIA TOURIST PERMIT"),
             ),
             serviceType=str(raw.get("serviceType", "Air Conditioned Service")),
+            distance=str(raw.get("distance", "1000")),
         )

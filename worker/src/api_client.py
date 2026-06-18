@@ -104,17 +104,21 @@ async def save_qr(
     driver_id: str,
     vehicle_number: str,
     image_base64: str,
+    portal_amount: float | None = None,
 ) -> dict:
-    return await _post(
-        "/api/internal/save-qr",
-        {
-            "requestId": request_id,
-            "driverId": driver_id,
-            "vehicleNumber": vehicle_number,
-            "imageBase64": image_base64,
-        },
-    )
 
+    payload: dict = {
+        "requestId": request_id,
+        "driverId": driver_id,
+        "vehicleNumber": vehicle_number,
+        "imageBase64": image_base64,
+    }
+
+    if portal_amount is not None:
+        payload["portalAmount"] = portal_amount
+
+    return await _post("/api/internal/save-qr", payload)
+   
 
 async def save_receipt(
     *,

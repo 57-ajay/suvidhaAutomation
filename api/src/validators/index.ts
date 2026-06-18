@@ -6,8 +6,9 @@
 
 import type { StateValidator } from "./types";
 import { upValidator } from "./states/up";
+import { hrValidator } from "./states/hr";
 
-const VALIDATORS: StateValidator[] = [upValidator];
+const VALIDATORS: StateValidator[] = [upValidator, hrValidator];
 
 const ALIASES: Record<string, string> = {
     "U.P.": "UP",

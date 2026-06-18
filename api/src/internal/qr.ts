@@ -15,6 +15,7 @@ export interface SaveQRInput {
     driverId: string;
     vehicleNumber?: string;
     imageBase64: string;
+    portalAmount?: number;
 }
 
 export async function handleSaveQR(input: SaveQRInput) {
@@ -39,6 +40,12 @@ export async function handleSaveQR(input: SaveQRInput) {
     // const expiredAt = isoIST(new Date(Date.now() + ttlSeconds * 1000));
     const expiresDate = new Date(Date.now() + ttlSeconds * 1000);
 
+    const portalAmount =
+        typeof input.portalAmount === "number" &&
+            Number.isFinite(input.portalAmount)
+            ? input.portalAmount
+            : undefined;
+
     await patchAiAgentData(requestId, driverId, {
         qrCode: {
             url: up.url,
@@ -46,6 +53,7 @@ export async function handleSaveQR(input: SaveQRInput) {
             expiredAt: ts(expiresDate),
             notificationSent: false,
             notificationSentAt: null,
+            ...(portalAmount !== undefined ? { portalAmount } : {}),
         },
     });
 

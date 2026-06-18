@@ -188,6 +188,9 @@ async def _abort_on_blocking_popup(
 PHASE_GAP_SECS = 1.5
 PERMIT_SET_TIMEOUT_SECS = 15
 CHECKPOINT_POPULATE_TIMEOUT = 10
+# "Yes" -> eTransPgi redirect is slow/variable; how long submit() polls for a
+# decisive advanced/rejected signal before reporting not-advanced.
+SUBMIT_SETTLE_SECS = 15
 
 _UP_PAYMENT_CONFIG = PaymentCaptureConfig(
     state_name="Uttar Pradesh",
@@ -772,14 +775,58 @@ async def disclaimer_captcha(ctx: RunContext) -> None:
             )
         except ScriptedAbort:
             pass
-        await asyncio.sleep(1.5)
+        
+        # OLD STALE CODE
+        # await asyncio.sleep(1.5)
+        #
+        # url = (await current_url(ctx.session)).lower()
+        # captcha_gone = await cdp_eval(
+        #     ctx.session,
+        #     "!document.querySelector(" + json.dumps(SEL_CAPTCHA_INPUT) + ")",
+        # )
+        # return any(g in url for g in GATEWAY_URL_MARKERS) or bool(captcha_gone)
+        # OLD STALE CODE END
 
-        url = (await current_url(ctx.session)).lower()
-        captcha_gone = await cdp_eval(
-            ctx.session,
-            "!document.querySelector(" + json.dumps(SEL_CAPTCHA_INPUT) + ")",
-        )
-        return any(g in url for g in GATEWAY_URL_MARKERS) or bool(captcha_gone)
+
+        # The eTransPgi redirect after "Yes" is slow and highly variable. Poll
+        # for a DECISIVE signal instead of checking once after a fixed sleep:
+        #   advanced = gateway URL present, OR the captcha input left the DOM
+        #              (we navigated off the disclaimer page)
+        #   rejected = a captcha invalid/mismatch popup is up -> stop early
+        # Without this, a slow redirect reads as "not advanced" while we're
+        # still on the disclaimer page with the captcha present, so the solver
+        #refreshes and retries a captcha the portal already ACCEPTED (and in
+        # AI mode the retry then finds no canvas and fails/hands off).
+        deadline = time.monotonic() + SUBMIT_SETTLE_SECS
+
+        while time.monotonic() < deadline:
+            url = (await current_url(ctx.session)).lower()
+
+            if any(g in url for g in GATEWAY_URL_MARKERS):
+                return True
+
+            captcha_gone = await cdp_eval(
+                ctx.session,
+                "!document.querySelector(" + json.dumps(SEL_CAPTCHA_INPUT) + ")",
+            )
+
+            if captcha_gone:
+                return True
+
+            # Decisive the other way: a captcha invalid/mismatch popup. Inlined
+            # (vs calling rejected()) so submit() stays self-contained.
+            from engine.steps import read_popup_text
+
+            ptxt = (await read_popup_text(ctx.session) or "").lower()
+
+            if "captcha" in ptxt and ("invalid" in ptxt or "mismatch" in ptxt):
+                return False
+
+            await asyncio.sleep(0.5)
+
+        # No decisive signal within the window — report not-advanced. Safe: no
+        # money moves before the gateway page, and solve_captcha re-evaluates.
+        return False
 
     async def rejected() -> bool:
         from engine.steps import read_popup_text

@@ -64,6 +64,8 @@ Doc: `driverUtilitiesRequests/data/borderTaxRequests/{requestId}`
   uploadedAt, inputDeadline, resultAt}`
 - `aiAgentData.qrCode` — `{url, uploadedAt, expiredAt, notificationSent:false,
   notificationSentAt:null}` (the existing Firestore trigger sends the push)
+- `aiAgentData.portalAmount` — border-tax amount (₹) read from the portal,
+  written with the QR so the app can show the price on the payment screen
 - `aiAgentData.receipt` — `{url, fields{receiptNumber, amount, paymentDate,
   bankRef}, uploadedAt}` + `paymentCompleted`, `receiptGenerated` flags
 - `agentCost`

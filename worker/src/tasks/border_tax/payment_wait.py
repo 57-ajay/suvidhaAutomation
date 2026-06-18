@@ -211,11 +211,15 @@ async def _push_qr(ctx: RunContext, config: PaymentCaptureConfig) -> None:
             terminal="failed",
         )
 
+
+    amount = ctx.scratch.get("portalAmount")
+
     resp = await api_client.save_qr(
         request_id=p.requestId,
         driver_id=p.driverId,
         vehicle_number=p.vehicleNumber,
         image_base64=b64,
+        portal_amount=amount,
     )
     if not resp.get("ok"):
         raise ScriptedAbort(
@@ -227,7 +231,7 @@ async def _push_qr(ctx: RunContext, config: PaymentCaptureConfig) -> None:
     ctx.reporter.sync_local(Status.QR_PAYMENT_NEEDED)
     ctx.r.hset(job_key(ctx.job_id), "qrCodeUrl", resp.get("url", ""))
 
-    amount = ctx.scratch.get("portalAmount")
+    # amount = ctx.scratch.get("portalAmount")
     ctx.reporter.set_wait(
         f"UPI payment required for border tax of vehicle {p.vehicleNumber} "
         f"entering {config.state_name}"
