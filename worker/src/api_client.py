@@ -105,6 +105,7 @@ async def save_qr(
     vehicle_number: str,
     image_base64: str,
     portal_amount: float | None = None,
+    state_code: str = "",
 ) -> dict:
 
     payload: dict = {
@@ -113,6 +114,9 @@ async def save_qr(
         "vehicleNumber": vehicle_number,
         "imageBase64": image_base64,
     }
+
+    if len(state_code) != 0:
+        payload["state_code"] = state_code
 
     if portal_amount is not None:
         payload["portalAmount"] = portal_amount

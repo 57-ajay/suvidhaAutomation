@@ -464,13 +464,13 @@ async def owner_info(ctx: RunContext) -> None:
         clear_status, hint = await pending_clear.clear_pending_transaction(ctx)
         if clear_status == "still_on_hold":
             raise ScriptedAbort(
-                f"a pending transaction for {p.vehicleNumber} cannot be "
-                f"cleared yet — the portal says retry in ~{hint}",
+                f"a pending transaction for {p.vehicleNumber} cannot be cleared yet",
+                # f"cleared yet — the portal says retry in ~{hint}",
                 terminal="cancelled",
             )
         if clear_status != "cleared":
             raise ScriptedAbort(
-                f"pending transaction could not be cleared ({hint})",
+                f"pending transaction could not be cleared ({hint.removesuffix("OKNoCancel")})",
                 terminal="cancelled",
             )
         raise RestartFrom("open_portal", "pending transaction cleared")

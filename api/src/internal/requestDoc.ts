@@ -198,7 +198,7 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
         const topLevel: Record<string, unknown> = {
             aiAgentData,
             updatedAt: now,
-            status: TOP_LEVEL_STATUS[to],
+            // status: TOP_LEVEL_STATUS[to],
             statusUpdateHistory: [
                 ...((snap.get("statusUpdateHistory") as unknown[]) ?? []),
                 {

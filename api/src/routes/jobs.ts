@@ -4,6 +4,8 @@
 
 import { redis, keys, JOB_TTL } from "../redis";
 import { json, readJson } from "../lib/http";
+import { applyTerminal } from "../internal/requestDoc";
+import { STATUS } from "../lifecycle/statuses";
 
 const TERMINAL = new Set(["done", "cancelled", "failed", "partial"]);
 
@@ -57,11 +59,37 @@ export async function handleCancel(jobId: string): Promise<Response> {
     if (TERMINAL.has(job.status ?? "")) {
         return json({ error: `job already ${job.status}` }, 400);
     }
-
-    if (job.status === "queued") {
+    //
+    // if (job.status === "queued") {
+    //     await redis.lrem(keys.queue, 0, jobId);
+    // }
+    const wasQueued = job.status === "queued";
+    if (wasQueued) {
         await redis.lrem(keys.queue, 0, jobId);
     }
     await redis.hset(keys.job(jobId), "status", "cancelled");
     await redis.expire(keys.job(jobId), JOB_TTL);
+
+    // A RUNNING job's Firestore terminal is written when it stops — by the
+    // worker, or the orchestrator's finalize_orphan fallback. But a job
+    // cancelled while still QUEUED is pulled from the queue above and never
+    // reaches a worker, so nothing else writes its terminal and the client
+    // doc would sit at "queued" forever. Write it here. Queued is always
+    // pre-payment -> a clean cancelled; terminalApplied guards a double-write
+    // if a worker raced in before the lrem.
+    if (wasQueued && job.requestId && job.driverId) {
+        await applyTerminal({
+            requestId: job.requestId,
+            driverId: job.driverId,
+            to: STATUS.CANCELLED,
+            source: job.source ?? "app",
+            summary: "cancelled by user before the run started",
+            error: "cancelled by user",
+        }).catch((e) =>
+            console.error(`[cancel] Firestore terminal write failed for ${jobId}: ${e.message}`),
+        );
+        await redis.hset(keys.job(jobId), "terminalApplied", "1");
+    }
+
     return json({ ok: true, message: "cancellation requested" });
 }

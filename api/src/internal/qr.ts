@@ -6,7 +6,7 @@
 // to the driver and flips it.
 
 import { uploadBase64 } from "../lib/gcs";
-import { config } from "../config";
+import { qrValidSecsForState } from "../config";
 import { patchAiAgentData, setAgentStatus, isoIST, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 
@@ -16,6 +16,7 @@ export interface SaveQRInput {
     vehicleNumber?: string;
     imageBase64: string;
     portalAmount?: number;
+    stateCode?: string; // selects the per-state QR validity (falls back to default)
 }
 
 export async function handleSaveQR(input: SaveQRInput) {
@@ -27,7 +28,7 @@ export async function handleSaveQR(input: SaveQRInput) {
         return { ok: false, error: "imageBase64 required" };
     }
 
-    const ttlSeconds = config.qrValidUpto
+    const ttlSeconds = qrValidSecsForState(input.stateCode);
     const up = await uploadBase64({
         base64: input.imageBase64,
         destination: `${requestId}_${driverId}/qr_code.png`,

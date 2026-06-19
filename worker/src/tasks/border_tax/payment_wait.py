@@ -220,6 +220,7 @@ async def _push_qr(ctx: RunContext, config: PaymentCaptureConfig) -> None:
         vehicle_number=p.vehicleNumber,
         image_base64=b64,
         portal_amount=amount,
+        state_code=p.stateCode
     )
     if not resp.get("ok"):
         raise ScriptedAbort(
