@@ -53,6 +53,10 @@ export function isoIST(d: Date = new Date()): string {
 const QR_NO_PAYMENT_BLOCK_MS = 45 * 60 * 1000;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
+export function afterFiveMinutes(from: Date = new Date()): Date {
+    return new Date(from.getTime() + 5 * 60 * 1000);
+}
+
 export function nextISTMidnight(from: Date = new Date()): Date {
     const ist = new Date(from.getTime() + IST_OFFSET_MS);
     const nextMidnightISTAsUTC = Date.UTC(
@@ -235,7 +239,7 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
             );
             const unblockAt = hasQR
                 ? new Date(Date.now() + QR_NO_PAYMENT_BLOCK_MS)
-                : nextISTMidnight();
+                : afterFiveMinutes();
             topLevel.nextRequestAllowed = ts(unblockAt);
         }
 

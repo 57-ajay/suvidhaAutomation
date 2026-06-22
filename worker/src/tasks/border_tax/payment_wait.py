@@ -325,7 +325,7 @@ async def wait_for_payment_and_capture(
                     f"driver most likely did not complete the UPI payment"
                     + (f" (SBI ref {bank_ref})" if bank_ref else "")
                 ),
-                error=f'the bank page showed: "{snippet}"',
+                error=f'Tax payment for vehicle {p.vehicleNumber} might not be completed.',
                 transaction_id=bank_ref,
                 payment_likely=False,
                 run_log=ctx.log.dump(),
