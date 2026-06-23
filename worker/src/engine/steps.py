@@ -94,8 +94,10 @@ _PICK_JS = (
 )
 
 
-async def _breathe() -> None:
-    if STEP_DELAY_SECS > 0:
+async def _breathe(delay = 0.0) -> None:
+    if delay > 0.0:
+        await asyncio.sleep(delay)
+    elif STEP_DELAY_SECS > 0:
         await asyncio.sleep(STEP_DELAY_SECS)
 
 
@@ -175,6 +177,7 @@ async def wait_for_selector(
             info = await cdp_eval(session, expr)
             if info and info.get("w", 0) > 0 and info.get("h", 0) > 0:
                 _ok(log, name, started, selector=selector)
+                await _breathe(0.4)
                 return
             if time.monotonic() > deadline:
                 raise TimeoutError(f"not visible within {timeout}s: {selector}")
@@ -200,6 +203,7 @@ async def wait_for_url(
             url = await current_url(session)
             if contains.lower() in url.lower():
                 _ok(log, name, started, url=url)
+                await _breathe(0.4)
                 return
             if time.monotonic() > deadline:
                 raise TimeoutError(
@@ -474,6 +478,7 @@ async def dismiss_popup(
     try:
         await cdp_eval(session, expr)
         _ok(log, name, started)
+        await _breathe(0.5)
     except Exception:
         pass
 

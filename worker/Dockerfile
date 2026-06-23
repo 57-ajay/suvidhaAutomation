@@ -20,6 +20,7 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY uv.lock* ./
+COPY pyrightconfig.json ./
 RUN uv sync --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH" \
