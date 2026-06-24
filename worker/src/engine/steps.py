@@ -401,6 +401,20 @@ async def get_select_value(session, selector: str) -> str | None:
         return None
 
 
+async def get_input_type(session, selector: str) -> str | None:
+    """`type` of the LAST VISIBLE input matching the selector (e.g. 'date' or
+    'datetime-local'), or None if not found / not an input. No log entry.
+    Lets a state choose date vs datetime-local formatting from the live DOM."""
+    expr = (
+        "(function(s){" + _PICK_JS + "var e=__pick(s);"
+        "return e ? e.type : null;})(" + json.dumps(selector) + ")"
+    )
+    try:
+        return await cdp_eval(session, expr)
+    except Exception:
+        return None
+
+
 async def get_text(session, selector: str) -> str:
     expr = (
         "(function(s){" + _PICK_JS + "var e=__pick(s);"

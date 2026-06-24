@@ -182,8 +182,12 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
         const from: Status = isStatus(cur) ? cur : STATUS.QUEUED;
         assertTransition(from, to);
 
-        const prevTop: string = snap.get("status") ?? "";
+        // const prevTop: string = snap.get("status") ?? "";
 
+        let transactionId = "NOT_AVAILABLE";
+        if (opts.transactionId) {
+            transactionId = opts.transactionId;
+        }
         const aiAgentData: Record<string, unknown> = {
             status: to,
             statusUpdatedAt: now,
@@ -197,21 +201,22 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
             ...(to === STATUS.COMPLETED && opts.receiptUrl
                 ? { receiptGenerated: true, receiptGeneratedAt: now }
                 : {}),
+            transactionId: transactionId,
         };
 
         const topLevel: Record<string, unknown> = {
             aiAgentData,
             updatedAt: now,
             // status: TOP_LEVEL_STATUS[to],
-            statusUpdateHistory: [
-                ...((snap.get("statusUpdateHistory") as unknown[]) ?? []),
-                {
-                    beforeStatus: prevTop,
-                    afterStatus: TOP_LEVEL_STATUS[to],
-                    at: now,
-                    transactionId: opts.transactionId ?? "",
-                },
-            ],
+            // statusUpdateHistory: [
+            //     ...((snap.get("statusUpdateHistory") as unknown[]) ?? []),
+            //     {
+            //         beforeStatus: prevTop,
+            //         afterStatus: TOP_LEVEL_STATUS[to],
+            //         at: now,
+            //         transactionId: opts.transactionId ?? "",
+            //     },
+            // ],
         };
 
         if (to === STATUS.COMPLETED && opts.receiptUrl) {

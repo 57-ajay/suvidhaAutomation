@@ -79,6 +79,7 @@ from ..payment_wait import (
     PaymentCaptureConfig,
     wait_for_payment_and_capture,
 )
+from ..tax_dates import fill_tax_dates
 
 ENTRY_URL = "https://parivahan.gov.in/en/node/579"
 
@@ -666,15 +667,24 @@ async def tax_info(ctx: RunContext) -> None:
             terminal="cancelled",
         )
 
-    await fill(
-        ctx.session, SEL_TAX_FROM, p.taxFrom, log=ctx.log, name="p5.fill_tax_from"
+    # Tax From (+ Tax Upto in DAYS mode). UP's fields are plain type="date",
+    # so fill_tax_dates detects that and sends the bare ISO date (no time) —
+    # byte-identical to before, now routed through the shared, config-checked
+    # path so new states inherit correct date/datetime handling. MP reuses
+    # this tax_info verbatim and is also type="date"; stateCode keeps the
+    # config/drift logs labelled per job. See tax_dates.py.
+    await fill_tax_dates(
+        ctx.session,
+        p.stateCode or "UP",
+        SEL_TAX_FROM,
+        SEL_TAX_UPTO,
+        p.taxFrom,
+        p.taxUpto,
+        fills_upto=p.fills_tax_upto,
+        log=ctx.log,
     )
 
-    if p.fills_tax_upto:
-        await fill(
-            ctx.session, SEL_TAX_UPTO, p.taxUpto, log=ctx.log, name="p5.fill_tax_upto"
-        )
-    else:
+    if not p.fills_tax_upto:
         # MONTHLY/QUARTERLY/YEARLY: the portal computes and locks Tax Upto
         # from Tax From + mode. Writing it would override that value behind
         # the UI lock, so we don't touch it — we read it back for the record.

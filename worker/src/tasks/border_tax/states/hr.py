@@ -94,6 +94,7 @@ from ..payment_wait import (
     PaymentCaptureConfig,
     wait_for_payment_and_capture,
 )
+from ..tax_dates import fill_tax_dates
 
 # UP's CheckPost wizard is identical to HR's up to the payment gateway, so we
 # reuse its proven phases and the shared parivahan DOM helpers/constants
@@ -160,15 +161,6 @@ _HR_PAYMENT_CONFIG = PaymentCaptureConfig(
         r"checkpost\s*tax\s*e-?receipt",
     ],
 )
-
-
-def _to_datetime_local(iso_date: str) -> str:
-    """HR's date inputs are datetime-local and reject a bare YYYY-MM-DD.
-    Append T00:00 to the API-normalized ISO date. Idempotent."""
-    s = (iso_date or "").strip()
-    if not s:
-        return s
-    return s if "T" in s else f"{s}T00:00"
 
 
 # ─── HR-specific phases ──────────────────────────────────────────────────
@@ -410,26 +402,23 @@ async def tax_info(ctx: RunContext) -> None:
             terminal="cancelled",
         )
 
-    # Tax From — datetime-local: append T00:00.
-    await fill(
+    # Tax From (+ Tax Upto in DAYS mode). HR's fields are datetime-local;
+    # fill_tax_dates stamps the current IST time once and reuses it for both
+    # ends, so the From->Upto span stays an exact 24h multiple (HR is
+    # NO_SAME_DAY, so DAYS taxUpto is already taxFrom + duration >= tomorrow,
+    # above the field min). See tax_dates.py.
+    await fill_tax_dates(
         ctx.session,
+        "HR",
         SEL_TAX_FROM,
-        _to_datetime_local(p.taxFrom),
+        SEL_TAX_UPTO,
+        p.taxFrom,
+        p.taxUpto,
+        fills_upto=p.fills_tax_upto,
         log=ctx.log,
-        name="p5.fill_tax_from",
     )
 
-    if p.fills_tax_upto:
-        # DAYS only — Tax Upto is editable; HR is NO_SAME_DAY so taxUpto is
-        # already taxFrom + duration (>= tomorrow), above the field's min.
-        await fill(
-            ctx.session,
-            SEL_TAX_UPTO,
-            _to_datetime_local(p.taxUpto),
-            log=ctx.log,
-            name="p5.fill_tax_upto",
-        )
-    else:
+    if not p.fills_tax_upto:
         # MONTHLY / QUARTERLY / HALF YEARLY / YEARLY: the portal computes and
         # LOCKS Tax Upto from Tax From + mode. Writing it would override the
         # value behind the UI lock, so we read it back for the record only.
