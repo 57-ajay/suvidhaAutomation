@@ -9,12 +9,15 @@ import { upValidator } from "./states/up";
 import { hrValidator } from "./states/hr";
 import { mpValidator } from "./states/mp";
 import { pbValidator } from "./states/pb";
+import { hpValidator } from "./states/hp";
 
-const VALIDATORS: StateValidator[] = [upValidator, hrValidator, mpValidator, pbValidator];
+const VALIDATORS: StateValidator[] = [upValidator, hrValidator, mpValidator, pbValidator, hpValidator];
 
 const ALIASES: Record<string, string> = {
     "U.P.": "UP",
     "UTTARPRADESH": "UP",
+    "H.P.": "HP",
+    "HIMACHALPRADESH": "HP",
 };
 
 function normalizeKey(input: string): string {

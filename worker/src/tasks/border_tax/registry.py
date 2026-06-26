@@ -7,7 +7,7 @@ from __future__ import annotations
 from engine.pipeline import Phase
 from engine.types import ScriptedAbort
 
-from .states import up, hr, mp, pb
+from .states import up, hr, mp, pb, hp
 from .verify_pending import make_verify_phases
 
 _RUNNERS: dict[str, list[Phase]] = {
@@ -15,6 +15,7 @@ _RUNNERS: dict[str, list[Phase]] = {
     "HR": hr.PHASES,
     "MP": mp.PHASES,
     "PB": pb.PHASES,
+    "HP": hp.PHASES,
 }
 
 _VERIFY_CONFIGS = {
@@ -22,6 +23,7 @@ _VERIFY_CONFIGS = {
     "HR": hr._HR_PAYMENT_CONFIG,
     "MP": mp._MP_PAYMENT_CONFIG,
     "PB": pb._PB_PAYMENT_CONFIG,
+    "HP": hp._HP_PAYMENT_CONFIG,
 }
 
 
@@ -40,6 +42,8 @@ _ALIASES: dict[str, str] = {
     "HARYANA": "HR",
     "MADHYA PRADESH": "MP",
     "PUNJAB": "PB",
+    "HIMACHAL PRADESH": "HP",
+    "H.P.": "HP",
 }
 
 

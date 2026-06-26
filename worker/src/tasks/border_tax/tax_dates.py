@@ -57,6 +57,7 @@ STATE_USES_TIME: dict[str, bool] = {
     "HR": True,
     "UP": False,
     "MP": False,
+    "HP": True,
 }
 
 

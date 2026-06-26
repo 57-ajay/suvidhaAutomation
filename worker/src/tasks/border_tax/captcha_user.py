@@ -38,7 +38,7 @@ from config import (
     MAX_USER_CAPTCHA_ATTEMPTS,
     CAPTCHA_DEBUG_DIR,
 )
-from engine.canvas import wait_and_capture_canvas_png
+from engine.canvas import wait_and_capture_canvas_png, capture_element_png
 from engine.steps import cdp_eval, dismiss_popup, fill
 from engine.types import RunContext, ScriptedAbort, StepLog, StepStatus
 from lifecycle.status import Status
@@ -67,6 +67,7 @@ async def _capture_readable(
     *,
     refresh_selector: str,
     canvas_scope: str | None = None,
+    image_selector: str | None = None,
 ) -> str | None:
     """Capture the captcha the user/OCR will actually be validated against.
 
@@ -75,6 +76,12 @@ async def _capture_readable(
     do we refresh ONCE, settle, and wait again. After this returns an image,
     NOTHING may touch refresh until the portal rejects the answer."""
     await asyncio.sleep(1.0)  # let the section mount before the first probe
+    # NEW: an <img> captcha (e.g. HP's himkosh ASP.NET Captcha.aspx) is not a
+    # canvas. capture_element_png polls until the image is fully loaded, so it
+    # needs none of the canvas paint/refresh dance below.
+    if image_selector is not None:
+        return await capture_element_png(ctx.session, image_selector, timeout=12.0)
+
     scope = canvas_scope or "canvas"
 
     for round_no in (1, 2):
@@ -88,7 +95,9 @@ async def _capture_readable(
         if b64:
             if CAPTCHA_DEBUG_DIR:
                 try:
-                    import base64 as _b64, os as _os
+                    import base64 as _b64
+                    import os as _os
+
                     _os.makedirs(CAPTCHA_DEBUG_DIR, exist_ok=True)
                     _p = _os.path.join(
                         CAPTCHA_DEBUG_DIR,
@@ -96,10 +105,14 @@ async def _capture_readable(
                     )
                     with open(_p, "wb") as _f:
                         _f.write(_b64.b64decode(b64))
-                    ctx.log.record(StepLog(
-                        index=ctx.log.next_index(), name="captcha.debug_dump",
-                        status=StepStatus.OK, value=_p,
-                    ))
+                    ctx.log.record(
+                        StepLog(
+                            index=ctx.log.next_index(),
+                            name="captcha.debug_dump",
+                            status=StepStatus.OK,
+                            value=_p,
+                        )
+                    )
                 except Exception:
                     pass
             ctx.log.record(
@@ -164,6 +177,7 @@ async def _try_ai_captcha(
     submit_action: Callable[[], Awaitable[bool]],
     is_rejected: Callable[[], Awaitable[bool]],
     canvas_scope: str | None,
+    image_selector: str | None = None,
 ) -> bool:
     """Silent Vertex-OCR attempts. No save-captcha, no captcha status, no
     captcha-result — the client must never see a captcha the AI is solving.
@@ -174,6 +188,7 @@ async def _try_ai_captcha(
             ctx,
             refresh_selector=refresh_selector,
             canvas_scope=canvas_scope,
+            image_selector=image_selector,
         )
         if b64 is None:
             return False  # capture failed; let a human try
@@ -237,6 +252,7 @@ async def _solve_human_captcha(
     submit_action: Callable[[], Awaitable[bool]],
     is_rejected: Callable[[], Awaitable[bool]],
     canvas_scope: str | None,
+    image_selector: str | None = None,
 ) -> None:
     """Capture -> save-captcha (flips `status` API-side via `stage`) -> wait for
     the user -> submit -> verdict, one fresh image per attempt."""
@@ -248,6 +264,7 @@ async def _solve_human_captcha(
             ctx,
             refresh_selector=refresh_selector,
             canvas_scope=canvas_scope,
+            image_selector=image_selector,
         )
         if b64 is None:
             raise ScriptedAbort(
@@ -360,9 +377,10 @@ async def solve_captcha(
     is_rejected: Callable[[], Awaitable[bool]],
     canvas_scope: str | None = None,
     mode: str | None = None,
-    human_fallback: bool = True,  # NEW
-    terminal: str = "cancelled",  # NEW: terminal when the seam is exhausted
-    abort_message: str | None = None,  # NEW
+    human_fallback: bool = True,
+    terminal: str = "cancelled",  # terminal when the seam is exhausted
+    abort_message: str | None = None,
+    image_selector: str | None = None,
 ) -> None:
     mode = (mode or CAPTCHA_MODE).lower()
 
@@ -374,6 +392,7 @@ async def solve_captcha(
             submit_action=submit_action,
             is_rejected=is_rejected,
             canvas_scope=canvas_scope,
+            image_selector=image_selector,
         ):
             return
         await dismiss_popup(ctx.session, log=ctx.log, name="captcha.ai_handoff")
@@ -392,6 +411,7 @@ async def solve_captcha(
         submit_action=submit_action,
         is_rejected=is_rejected,
         canvas_scope=canvas_scope,
+        image_selector=image_selector,
     )
 
 
