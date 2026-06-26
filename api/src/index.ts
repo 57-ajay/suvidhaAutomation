@@ -27,6 +27,13 @@ const server = Bun.serve({
         const url = new URL(req.url);
         const p = url.pathname;
 
+        // Opt-in guard for public mutating routes. No-op unless PUBLIC_API_KEY
+        // is set (so existing private deployments are unaffected).
+        const publicAuthorized = () =>
+            !config.publicApiKey ||
+            req.headers.get("X-Internal-Key") === config.publicApiKey;
+        const unauthorized = () => json({ ok: false, error: "unauthorized" }, 401);
+
         try {
             if (req.method === "GET" && p === "/api/health") {
                 return json({
@@ -44,9 +51,11 @@ const server = Bun.serve({
                 return await handleList(url.searchParams.get("limit"));
             }
             if (req.method === "POST" && p === "/api/run") {
+                if (!publicAuthorized()) return unauthorized();
                 return await handleRun(req);
             }
             if (req.method === "POST" && p === "/api/verify-pending") {
+                if (!publicAuthorized()) return unauthorized();
                 return handleVerifyPending(req);
             }
             if (req.method === "GET" && p === "/api/dashboard") {
@@ -60,10 +69,14 @@ const server = Bun.serve({
                 const [, jobId, action] = m;
                 if (action === "status" && req.method === "GET")
                     return await handleStatus(jobId!);
-                if (action === "intervene" && req.method === "POST")
+                if (action === "intervene" && req.method === "POST") {
+                    if (!publicAuthorized()) return unauthorized();
                     return await handleIntervene(jobId!, req);
-                if (action === "cancel" && req.method === "POST")
+                }
+                if (action === "cancel" && req.method === "POST") {
+                    if (!publicAuthorized()) return unauthorized();
                     return await handleCancel(jobId!);
+                }
             }
 
             if (p.startsWith("/api/internal/") && req.method === "POST") {

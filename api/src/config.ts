@@ -27,6 +27,14 @@ export const config = {
 
     // Shared secret for /api/internal/*. Empty = no check (private network).
     internalApiKey: process.env.INTERNAL_API_KEY ?? "",
+
+    // Opt-in guard for the PUBLIC mutating routes (/api/run, /api/verify-pending,
+    // /api/jobs/:id/intervene|cancel). Empty = no check (back-compat). Set this on
+    // an internet-exposed instance (e.g. the vendor panel's agent) so only callers
+    // that send a matching X-Internal-Key — the panel's Cloud Functions — can
+    // enqueue work or intervene. GET reads / the ops dashboard are unaffected and
+    // should be restricted at the proxy.
+    publicApiKey: process.env.PUBLIC_API_KEY ?? "",
 } as const;
 
 
