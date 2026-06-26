@@ -22,13 +22,22 @@ from .status import Status, can_transition, TERMINAL
 
 
 class StatusReporter:
-    def __init__(self, *, job_id: str, request_id: str, driver_id: str,
-                 source: str, r: redis.Redis):
+    def __init__(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        driver_id: str,
+        source: str,
+        r: redis.Redis,
+        task: str = "border-tax",
+    ):
         self.job_id = job_id
         self.request_id = request_id
         self.driver_id = driver_id
         self.source = source
         self.r = r
+        self.task = task
         self._current = Status.QUEUED
 
     @property
@@ -36,13 +45,19 @@ class StatusReporter:
         return self._current
 
     async def set_status(
-        self, to: str, *, error: str | None = None,
-        wait_reason: str | None = None, extra: dict | None = None,
+        self,
+        to: str,
+        *,
+        error: str | None = None,
+        wait_reason: str | None = None,
+        extra: dict | None = None,
         redis_extra: dict | None = None,
     ) -> None:
         if not can_transition(self._current, to):
-            print(f"[reporter] BLOCKED illegal {self._current} -> {to} "
-                  f"(job={self.job_id})")
+            print(
+                f"[reporter] BLOCKED illegal {self._current} -> {to} "
+                f"(job={self.job_id})"
+            )
             return
 
         mapping: dict[str, str] = {"agentStatus": to}
@@ -66,6 +81,7 @@ class StatusReporter:
                 source=self.source,
                 error=error,
                 extra=extra,
+                task=self.task,
             )
         except Exception as e:
             print(f"[reporter] status_update failed: {e}")
@@ -83,9 +99,13 @@ class StatusReporter:
 
     def set_wait(self, reason: str) -> None:
         try:
-            self.r.hset(job_key(self.job_id), mapping={
-                "status": "waiting_for_human", "waitReason": reason,
-            })
+            self.r.hset(
+                job_key(self.job_id),
+                mapping={
+                    "status": "waiting_for_human",
+                    "waitReason": reason,
+                },
+            )
         except Exception as e:
             print(f"[reporter] set_wait failed: {e}")
 

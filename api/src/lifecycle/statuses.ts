@@ -55,6 +55,7 @@ const ALLOWED: Record<Status, Status[]> = {
         STATUS.PENDING_TRANSACTION,
         STATUS.SETTING_UP_PAYMENT_REQUEST, // AI solved the disclaimer captcha silently
         STATUS.CAPTCHA_SOLVING,
+        STATUS.GENERATING_RECEIPT, // PUC: no-payment flow goes straight to capture
         STATUS.CANCELLED,
     ],
     [STATUS.PENDING_TRANSACTION]: [
@@ -65,6 +66,7 @@ const ALLOWED: Record<Status, Status[]> = {
     [STATUS.CAPTCHA_SOLVING]: [
         STATUS.SETTING_UP_PAYMENT_REQUEST,
         STATUS.PENDING_TRANSACTION_CAPTCHA, // human (or AI-fallback) pending captcha
+        STATUS.GENERATING_RECEIPT, // PUC: captcha accepted -> capture certificate
         STATUS.CANCELLED,
     ],
     [STATUS.SETTING_UP_PAYMENT_REQUEST]: [

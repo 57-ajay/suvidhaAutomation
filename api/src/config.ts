@@ -21,6 +21,14 @@ export const config = {
     gcsPrefix:
         process.env.GCS_PREFIX ?? "driverUtilitiesRequests/borderTaxRequests",
 
+    // PUC-certificate task: its own Firestore collection + GCS prefix. Same
+    // {requestId}/{driverId} substitution. Border-tax paths are untouched.
+    pucDocPathTemplate:
+        process.env.PUC_DOC_PATH_TEMPLATE ??
+        "driverUtilitiesRequests/data/pucRequests/{requestId}",
+    pucGcsPrefix:
+        process.env.PUC_GCS_PREFIX ?? "driverUtilitiesRequests/pucRequests",
+
     qrValidUpto: 2 * 60 + 50, // 170 seconds,
     qrValidityDays: int("QR_VALIDITY_DAYS", 7),
     captchaUrlTtlSeconds: int("CAPTCHA_URL_TTL_SECONDS", 600),
@@ -51,8 +59,29 @@ export function qrValidSecsForState(stateCode?: string): number {
     return QR_VALID_SECS_BY_STATE[code] ?? config.qrValidUpto;
 }
 
-export function requestDocPath(requestId: string, driverId: string): string {
-    return config.requestDocPathTemplate
+// Per-task Firestore document templates. Unknown / absent task -> border-tax.
+const DOC_PATH_TEMPLATE_BY_TASK: Record<string, string> = {
+    "border-tax": config.requestDocPathTemplate,
+    "puc-certificate": config.pucDocPathTemplate,
+};
+
+export function requestDocPath(
+    requestId: string,
+    driverId: string,
+    task: string = "border-tax",
+): string {
+    const tmpl = DOC_PATH_TEMPLATE_BY_TASK[task] ?? config.requestDocPathTemplate;
+    return tmpl
         .replace("{requestId}", requestId)
         .replace("{driverId}", driverId);
+}
+
+// Per-task GCS prefix for uploaded artifacts (captcha / QR / receipt).
+const GCS_PREFIX_BY_TASK: Record<string, string> = {
+    "border-tax": config.gcsPrefix,
+    "puc-certificate": config.pucGcsPrefix,
+};
+
+export function gcsPrefixForTask(task: string = "border-tax"): string {
+    return GCS_PREFIX_BY_TASK[task] ?? config.gcsPrefix;
 }

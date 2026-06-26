@@ -63,19 +63,38 @@ async def amain(job_id: str, display: str) -> None:
     source = job.get("source", "app")
     request_id = job.get("requestId") or params_raw.get("requestId", job_id)
     driver_id = job.get("driverId") or params_raw.get("driverId", "")
+    task_id = job.get("taskId", "border-tax")
 
     reporter = StatusReporter(
-        job_id=job_id, request_id=request_id, driver_id=driver_id, source=source, r=r
+        job_id=job_id,
+        request_id=request_id,
+        driver_id=driver_id,
+        source=source,
+        r=r,
+        task=task_id,
     )
     log = StepLogger()
     session = None
 
     try:
-        params = BorderTaxParams.from_job(params_raw)
-        phases = resolve_phases(params.state)
-        task = job.get("task", "borderTax")
+        task = job.get("task", "borderTax")  # border-tax sub-mode (verify vs normal)
+        max_restarts = 1
+        ctx_task = "border-tax"
 
-        if task == "verifyPendingPayment":
+        if task_id == "puc-certificate":
+            # No-payment PUC flow on the parivahan portal. Whole-flow retry is
+            # bounded by PUC_MAX_RETRIES; the captcha budget + per-phase
+            # deadlines bound the rest.
+            from tasks.puc.params import PucParams
+            from tasks.puc.flow import PHASES as puc_phases
+            from config import PUC_MAX_RETRIES
+
+            params = PucParams.from_job(params_raw)
+            phases = puc_phases
+            ctx_task = "puc-certificate"
+            max_restarts = PUC_MAX_RETRIES
+            await reporter.set_status(Status.AI_AGENT_STARTED)
+        elif task == "verifyPendingPayment":
             from tasks.border_tax.verify_pending import VerifyPendingParams
             from tasks.border_tax.registry import resolve_verify_phases
 
@@ -100,12 +119,50 @@ async def amain(job_id: str, display: str) -> None:
             log=log,
             r=r,
             job_id=job_id,
+            task=ctx_task,
         )
         # Global ceiling on top of the per-phase deadlines: whatever happens,
         # this job ends. Terminal follows the money-line rule below.
         outcome = await asyncio.wait_for(
-            run_phases(phases, ctx), timeout=JOB_MAX_RUNTIME_SECS
+            run_phases(phases, ctx, max_restarts=max_restarts),
+            timeout=JOB_MAX_RUNTIME_SECS,
         )
+    # try:
+    #     params = BorderTaxParams.from_job(params_raw)
+    #     phases = resolve_phases(params.state)
+    #     task = job.get("task", "borderTax")
+    #
+    #     if task == "verifyPendingPayment":
+    #         from tasks.border_tax.verify_pending import VerifyPendingParams
+    #         from tasks.border_tax.registry import resolve_verify_phases
+    #
+    #         params = VerifyPendingParams.from_job(params_raw)
+    #         phases = resolve_verify_phases(params.state)
+    #         # The request is already verifyingPendingPayment (set at park).
+    #         # Seed the local cursor so the FSM guard lets us go to
+    #         # generatingReceipt / failed without re-asserting it.
+    #         reporter.sync_local(Status.VERIFYING_PENDING_PAYMENT)
+    #     else:
+    #         params = BorderTaxParams.from_job(params_raw)
+    #         phases = resolve_phases(params.state)
+    #         await reporter.set_status(Status.AI_AGENT_STARTED)
+    #
+    #     session = build_browser_session(display)
+    #     await asyncio.wait_for(session.start(), timeout=90)
+    #
+    #     ctx = RunContext(
+    #         session=session,
+    #         params=params,
+    #         reporter=reporter,
+    #         log=log,
+    #         r=r,
+    #         job_id=job_id,
+    #     )
+    #     # Global ceiling on top of the per-phase deadlines: whatever happens,
+    #     # this job ends. Terminal follows the money-line rule below.
+    #     outcome = await asyncio.wait_for(
+    #         run_phases(phases, ctx), timeout=JOB_MAX_RUNTIME_SECS
+    #     )
     except asyncio.TimeoutError:
         pre = reporter.current in PRE_PAYMENT
         msg = (
@@ -254,6 +311,7 @@ async def amain(job_id: str, display: str) -> None:
         transaction_id=outcome.transaction_id,
         payment_likely=outcome.payment_likely,
         cost_data={"totalCost": round(outcome.total_cost_usd, 6)},
+        task=task_id,
     )
     if resp.get("ok"):
         r.hset(key, "terminalApplied", "1")

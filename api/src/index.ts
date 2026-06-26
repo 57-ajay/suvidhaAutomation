@@ -44,11 +44,14 @@ const server = Bun.serve({
             }
             if (req.method === "GET" && p === "/api/tasks") {
                 return json({
-                    tasks: [{ id: "border-tax", states: supportedStates() }],
+                    tasks: [
+                        { id: "border-tax", states: supportedStates() },
+                        { id: "puc-certificate", states: [] },
+                    ],
                 });
             }
             if (req.method === "GET" && p === "/api/jobs") {
-                return await handleList(url.searchParams.get("limit"));
+                return await handleList(url.searchParams);
             }
             if (req.method === "POST" && p === "/api/run") {
                 if (!publicAuthorized()) return unauthorized();

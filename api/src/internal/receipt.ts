@@ -4,8 +4,8 @@
 // applyTerminal so "money moved + receipt captured" lands atomically.
 
 import { uploadBase64 } from "../lib/gcs";
-import { config } from "../config";
-import { patchAiAgentData, isoIST, ts } from "./requestDoc";
+import { config, gcsPrefixForTask } from "../config";
+import { patchAiAgentData, isoIST, ts, patchRoot } from "./requestDoc";
 
 export interface SaveReceiptInput {
     requestId: string;
@@ -13,6 +13,7 @@ export interface SaveReceiptInput {
     pdfBase64?: string;
     imageBase64?: string; // PNG fallback if printToPDF ever fails
     fields?: Record<string, unknown>; // receiptNumber, amount, paymentDate, bankRef
+    task?: string;
 }
 
 export async function handleSaveReceipt(input: SaveReceiptInput) {
@@ -35,6 +36,7 @@ export async function handleSaveReceipt(input: SaveReceiptInput) {
         destination: `${requestId}_${driverId}/receipt.${isPdf ? "pdf" : "png"}`,
         contentType: isPdf ? "application/pdf" : "image/png",
         signedUrlTtlSeconds: config.qrValidityDays * 24 * 60 * 60,
+        prefix: gcsPrefixForTask(input.task),
     });
 
     await patchAiAgentData(requestId, driverId, {
@@ -45,7 +47,14 @@ export async function handleSaveReceipt(input: SaveReceiptInput) {
         },
         receiptGenerated: true,
         receiptGeneratedAt: ts(),
-    });
+    }, input.task);
+
+    // Mirror the URL at the document ROOT too. Newer app builds read
+    // aiAgentData.receipt.url; older ones read receiptDocumentUrl from the root.
+    // Writing both keeps every client version working — and because this is not
+    // FSM-guarded, the URL lands even if the lifecycle terminal is delayed or
+    // blocked (e.g. a re-run whose doc is still in a terminal state).
+    await patchRoot(requestId, driverId, { receiptDocumentUrl: up.url }, input.task);
 
     return { ok: true, url: up.url };
 }

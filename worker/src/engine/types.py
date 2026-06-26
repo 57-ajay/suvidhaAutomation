@@ -84,4 +84,5 @@ class RunContext:
     log: Any  # engine.log.StepLogger
     r: Any  # redis client
     job_id: str
+    task: str = "border-tax"  # selects the Firestore collection on every doc write
     scratch: dict = field(default_factory=dict)

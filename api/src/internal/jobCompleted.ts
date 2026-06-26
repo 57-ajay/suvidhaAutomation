@@ -22,6 +22,7 @@ export interface JobCompletedInput {
     transactionId?: string; // bank reference, captured even on failure
     paymentLikely?: boolean; // worker's read on whether money moved
     costData?: Record<string, unknown> | null;
+    task?: string;
 }
 
 export async function handleJobCompleted(input: JobCompletedInput) {
@@ -48,7 +49,7 @@ export async function handleJobCompleted(input: JobCompletedInput) {
             totalCost: 0,
             ...input.costData,
         };
-        await saveAgentCost(requestId, driverId, agentCost).catch((e) =>
+        await saveAgentCost(requestId, driverId, agentCost, input.task).catch((e) =>
             console.error(`[jobCompleted] saveAgentCost failed: ${e.message}`),
         );
     }
@@ -70,6 +71,7 @@ export async function handleJobCompleted(input: JobCompletedInput) {
         await applyTerminal({
             requestId,
             driverId,
+            task: input.task,
             to,
             source: input.source,
             summary: input.summary,

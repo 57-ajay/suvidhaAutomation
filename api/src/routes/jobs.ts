@@ -40,17 +40,42 @@ export async function handleIntervene(
     return json({ ok: true, message: "input submitted, agent will resume" });
 }
 
-export async function handleList(limitRaw: string | null): Promise<Response> {
-    const limit = Math.min(50, Math.max(1, parseInt(limitRaw ?? "20", 10) || 20));
-    const ids = await redis.zrevrange(keys.allJobs, 0, limit - 1);
-    const jobs: Record<string, string>[] = [];
+export async function handleList(params: URLSearchParams): Promise<Response> {
+    const limit = Math.min(100, Math.max(1, parseInt(params.get("limit") ?? "50", 10) || 50));
+    const offset = Math.max(0, parseInt(params.get("offset") ?? "0", 10) || 0);
+    const taskId = (params.get("taskId") ?? "").trim(); // "" = all tasks
+    const status = (params.get("status") ?? "").trim(); // "" = all statuses
+
+    // Newest-first ids, bounded so a busy console can't fan out unbounded
+    // HGETALLs. 1000 jobs is far more than the 24h TTL window ever holds.
+    const SCAN_MAX = 1000;
+    const ids = await redis.zrevrange(keys.allJobs, 0, SCAN_MAX - 1);
+
+    // Status breakdown for the header cards. Respects the task filter (so the
+    // cards reflect the selected task) but NOT the status filter — the cards ARE
+    // the status breakdown. The returned list additionally honours `status`.
+    const counts: Record<string, number> = {
+        done: 0, cancelled: 0, failed: 0, partial: 0,
+        running: 0, waiting_for_human: 0, queued: 0, parked: 0, total: 0,
+    };
+    const matched: Record<string, string>[] = [];
     for (const id of ids) {
         const job = await redis.hgetall(keys.job(id));
-        if (!job || !job.id) continue; // expired
-        const { params, ...rest } = job;
-        jobs.push(rest);
+        if (!job || !job.id) continue; // expired/cleared
+        if (taskId && (job.taskId ?? "border-tax") !== taskId) continue;
+
+        const st = job.status ?? "";
+        counts.total++;
+        if (Object.prototype.hasOwnProperty.call(counts, st)) counts[st]++;
+
+        if (status && st !== status) continue;
+        const { params: _drop, ...rest } = job;
+        matched.push(rest);
     }
-    return json({ jobs });
+
+    const total = matched.length;          // count AFTER filters (within the scan window)
+    const page = matched.slice(offset, offset + limit);
+    return json({ jobs: page, total, counts, limit, offset });
 }
 
 export async function handleCancel(jobId: string): Promise<Response> {
@@ -81,6 +106,7 @@ export async function handleCancel(jobId: string): Promise<Response> {
         await applyTerminal({
             requestId: job.requestId,
             driverId: job.driverId,
+            task: job.taskId ?? "border-tax",
             to: STATUS.CANCELLED,
             source: job.source ?? "app",
             summary: "cancelled by user before the run started",

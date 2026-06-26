@@ -18,7 +18,7 @@
 // pendingTransactionCaptcha instead of captchaSolving
 
 import { uploadBase64 } from "../lib/gcs";
-import { config } from "../config";
+import { config, gcsPrefixForTask } from "../config";
 import { patchAiAgentData, setAgentStatus, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 
@@ -30,6 +30,7 @@ export interface SaveCaptchaInput {
     maxAttempts?: number;
     waitSeconds?: number; // how long the worker will wait for the answer
     stage?: "disclaimer" | "pending"; // which page -> which captcha status
+    task?: string;
 }
 
 export async function handleSaveCaptcha(input: SaveCaptchaInput) {
@@ -45,6 +46,7 @@ export async function handleSaveCaptcha(input: SaveCaptchaInput) {
         base64: input.imageBase64,
         destination: `${requestId}_${driverId}/captcha_${attempt}.png`,
         signedUrlTtlSeconds: config.captchaUrlTtlSeconds,
+        prefix: gcsPrefixForTask(input.task),
     });
 
     const deadline = input.waitSeconds
@@ -61,14 +63,14 @@ export async function handleSaveCaptcha(input: SaveCaptchaInput) {
             inputDeadline: deadline,
             resultAt: null,
         },
-    });
+    }, input.task);
 
     const to_ =
         input.stage === "pending"
             ? STATUS.PENDING_TRANSACTION_CAPTCHA
             : STATUS.CAPTCHA_SOLVING;
     // Self-transition on captchaSolving is legal, so repeat attempts are fine.
-    await setAgentStatus({ requestId, driverId, to: to_ });
+    await setAgentStatus({ requestId, driverId, to: to_, task: input.task });
 
     return { ok: true, url: up.url, attempt };
 }
@@ -78,6 +80,7 @@ export interface CaptchaResultInput {
     driverId: string;
     result: "accepted" | "rejected";
     attempt: number;
+    task?: string;
 }
 
 export async function handleCaptchaResult(input: CaptchaResultInput) {
@@ -91,7 +94,7 @@ export async function handleCaptchaResult(input: CaptchaResultInput) {
 
     await patchAiAgentData(requestId, driverId, {
         captcha: { lastResult: result, attempt, resultAt: ts() },
-    });
+    }, input.task);
 
     return { ok: true };
 }

@@ -35,6 +35,7 @@ export async function handleInternal(
                 source: b.source,
                 error: b.error ?? undefined,
                 extra: b.extra,
+                task: b.task,
             });
             return json({ ok: true, status: written });
         } catch (e: any) {

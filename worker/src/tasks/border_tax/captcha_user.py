@@ -280,6 +280,7 @@ async def _solve_human_captcha(
             max_attempts=max_attempts,
             wait_seconds=CAPTCHA_WAIT_SECS,
             stage=stage,
+            task=getattr(ctx, "task", "border-tax"),
         )
         if not resp.get("ok"):
             raise ScriptedAbort(
@@ -327,6 +328,7 @@ async def _solve_human_captcha(
                 driver_id=p.driverId,
                 result="accepted",
                 attempt=attempt,
+                task=getattr(ctx, "task", "border-tax"),
             )
             ctx.log.record(
                 StepLog(

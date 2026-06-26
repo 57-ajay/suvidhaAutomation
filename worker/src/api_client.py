@@ -42,6 +42,7 @@ async def status_update(
     source: str = "app",
     error: str | None = None,
     extra: dict | None = None,
+    task: str = "border-tax",
 ) -> dict:
     return await _post(
         "/api/internal/status-update",
@@ -52,6 +53,7 @@ async def status_update(
             "source": source,
             "error": error,
             "extra": extra,
+            "task": task,
         },
     )
 
@@ -65,6 +67,7 @@ async def save_captcha(
     max_attempts: int,
     wait_seconds: int,
     stage: str = "disclaimer",
+    task: str = "border-tax",
 ) -> dict:
     return await _post(
         "/api/internal/save-captcha",
@@ -76,6 +79,7 @@ async def save_captcha(
             "maxAttempts": max_attempts,
             "waitSeconds": wait_seconds,
             "stage": stage,
+            "task": task,
         },
     )
 
@@ -86,6 +90,7 @@ async def captcha_result(
     driver_id: str,
     result: str,
     attempt: int,
+    task: str = "border-tax",
 ) -> dict:
     return await _post(
         "/api/internal/captcha-result",
@@ -94,6 +99,7 @@ async def captcha_result(
             "driverId": driver_id,
             "result": result,
             "attempt": attempt,
+            "task": task,
         },
     )
 
@@ -106,6 +112,7 @@ async def save_qr(
     image_base64: str,
     portal_amount: float | None = None,
     state_code: str = "",
+    task: str = "border-tax",
 ) -> dict:
 
     payload: dict = {
@@ -113,6 +120,7 @@ async def save_qr(
         "driverId": driver_id,
         "vehicleNumber": vehicle_number,
         "imageBase64": image_base64,
+        "task": task,
     }
 
     if len(state_code) != 0:
@@ -122,7 +130,7 @@ async def save_qr(
         payload["portalAmount"] = portal_amount
 
     return await _post("/api/internal/save-qr", payload)
-   
+
 
 async def save_receipt(
     *,
@@ -131,6 +139,7 @@ async def save_receipt(
     pdf_base64: str | None = None,
     image_base64: str | None = None,
     fields: dict | None = None,
+    task: str = "border-tax",
 ) -> dict:
     return await _post(
         "/api/internal/save-receipt",
@@ -140,6 +149,7 @@ async def save_receipt(
             "pdfBase64": pdf_base64,
             "imageBase64": image_base64,
             "fields": fields or {},
+            "task": task,
         },
         timeout=120.0,
     )
@@ -158,6 +168,7 @@ async def job_completed(
     transaction_id: str | None = None,
     payment_likely: bool = False,
     cost_data: dict | None = None,
+    task: str = "border-tax",
 ) -> dict:
     return await _post(
         "/api/internal/job-completed",
@@ -173,5 +184,6 @@ async def job_completed(
             "transactionId": transaction_id,
             "paymentLikely": payment_likely,
             "costData": cost_data,
+            "task": task,
         },
     )

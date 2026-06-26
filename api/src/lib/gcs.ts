@@ -7,10 +7,11 @@ import { config } from "../config";
 
 export interface UploadInput {
     base64: string;
-    destination: string; // relative to gcsPrefix
+    destination: string; // relative to the prefix
     contentType?: string;
     signedUrlTtlSeconds: number;
     metadata?: Record<string, string>;
+    prefix?: string; // overrides config.gcsPrefix (per-task namespacing)
 }
 
 export interface UploadResult {
@@ -20,7 +21,8 @@ export interface UploadResult {
 }
 
 export async function uploadBase64(input: UploadInput): Promise<UploadResult> {
-    const gcsPath = `${config.gcsPrefix}/${input.destination}`;
+    // const gcsPath = `${config.gcsPrefix}/${input.destination}`;
+    const gcsPath = `${input.prefix ?? config.gcsPrefix}/${input.destination}`;
     const buffer = Buffer.from(input.base64, "base64");
     if (buffer.length === 0) throw new Error("upload payload is empty");
 

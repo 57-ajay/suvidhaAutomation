@@ -72,3 +72,7 @@ EGRESS_PROXY = os.environ.get("EGRESS_PROXY", "").strip()
 # When set, every captcha image the worker captures is written here as PNG
 # (mount it as a volume, or `docker cp`, to retrieve). Debug only.
 CAPTCHA_DEBUG_DIR = os.environ.get("CAPTCHA_DEBUG_DIR", "").strip()
+
+# PUC-certificate task. Whole-flow restarts from the portal open on any
+# transient failure; the captcha budget + per-phase deadlines bound the rest.
+PUC_MAX_RETRIES = int(os.environ.get("PUC_MAX_RETRIES", "2"))

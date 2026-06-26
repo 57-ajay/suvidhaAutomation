@@ -66,15 +66,16 @@ export function nextISTMidnight(from: Date = new Date()): Date {
     return new Date(nextMidnightISTAsUTC - IST_OFFSET_MS);
 }
 
-function docRef(requestId: string, driverId: string) {
-    return db.doc(requestDocPath(requestId, driverId));
+function docRef(requestId: string, driverId: string, task: string = "border-tax") {
+    return db.doc(requestDocPath(requestId, driverId, task));
 }
 
 export async function getAgentStatus(
     requestId: string,
     driverId: string,
+    task: string = "border-tax",
 ): Promise<Status> {
-    const snap = await docRef(requestId, driverId).get();
+    const snap = await docRef(requestId, driverId, task).get();
     const cur = snap.get("aiAgentData.status");
     return isStatus(cur) ? cur : STATUS.QUEUED;
 }
@@ -89,6 +90,8 @@ export interface SetStatusOpts {
     extra?: Record<string, unknown>;
     /** Skip the FSM guard — only for the very first write from queued. */
     force?: boolean;
+    /** Routes the doc write to the task's collection (default border-tax). */
+    task?: string;
 }
 
 /**
@@ -99,7 +102,7 @@ export interface SetStatusOpts {
  */
 export async function setAgentStatus(opts: SetStatusOpts): Promise<Status> {
     const { requestId, driverId, to } = opts;
-    const ref = docRef(requestId, driverId);
+    const ref = docRef(requestId, driverId, opts.task);
 
     await db.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
@@ -135,8 +138,9 @@ export async function patchAiAgentData(
     requestId: string,
     driverId: string,
     fields: Record<string, unknown>,
+    task: string = "border-tax",
 ): Promise<void> {
-    await docRef(requestId, driverId).set(
+    await docRef(requestId, driverId, task).set(
         { aiAgentData: fields, updatedAt: ts() },
         { merge: true },
     );
@@ -146,9 +150,25 @@ export async function saveAgentCost(
     requestId: string,
     driverId: string,
     agentCost: Record<string, unknown>,
+    task: string = "border-tax",
 ): Promise<void> {
-    await docRef(requestId, driverId).set(
+    await docRef(requestId, driverId, task).set(
         { agentCost, updatedAt: ts() },
+        { merge: true },
+    );
+}
+
+/** Merge top-level (document root) fields. NOT FSM-guarded — lands even if the
+ *  lifecycle terminal is delayed/blocked. Used for root mirrors like
+ *  receiptDocumentUrl that older app builds read from the document root. */
+export async function patchRoot(
+    requestId: string,
+    driverId: string,
+    fields: Record<string, unknown>,
+    task: string = "border-tax",
+): Promise<void> {
+    await docRef(requestId, driverId, task).set(
+        { ...fields, updatedAt: ts() },
         { merge: true },
     );
 }
@@ -163,6 +183,8 @@ export interface ApplyTerminalOpts {
     receiptUrl?: string | null;
     paymentCompleted?: boolean;
     transactionId?: string;
+    /** Routes the terminal write to the task's collection (default border-tax). */
+    task?: string;
 }
 
 /**
@@ -173,7 +195,7 @@ export interface ApplyTerminalOpts {
 export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
     const { requestId, driverId, to } = opts;
     if (!isTerminal(to)) throw new Error(`applyTerminal called with "${to}"`);
-    const ref = docRef(requestId, driverId);
+    const ref = docRef(requestId, driverId, opts.task);
     const now = ts();
 
     await db.runTransaction(async (tx) => {
