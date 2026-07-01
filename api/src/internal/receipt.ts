@@ -54,7 +54,7 @@ export async function handleSaveReceipt(input: SaveReceiptInput) {
     // Writing both keeps every client version working — and because this is not
     // FSM-guarded, the URL lands even if the lifecycle terminal is delayed or
     // blocked (e.g. a re-run whose doc is still in a terminal state).
-    await patchRoot(requestId, driverId, { receiptDocumentUrl: up.url }, input.task);
+    await patchRoot(requestId, driverId, { receiptDocumentUrl: up.url, status: "completed" }, input.task);
 
     return { ok: true, url: up.url };
 }

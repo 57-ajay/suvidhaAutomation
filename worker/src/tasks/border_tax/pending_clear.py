@@ -50,6 +50,7 @@ from engine.types import RunContext, ScriptedAbort, StepLog, StepStatus
 # from redis_client import job_key
 from lifecycle.status import Status
 from .captcha_user import solve_captcha
+from .manual_entry import dismiss_chassis_bug_popup
 
 # ─── Selectors (live HTML, CheckPost V4.7.x — state-agnostic SPA shell) ─
 URL_PORTAL_HOME = "https://services.parivahan.gov.in/checkpostv4/#/"
@@ -95,6 +96,12 @@ _OWNER_INFO_OUTCOME_JS = """
     }
     if (/(insurance|fitness|pucc|expired|renew|not\\s*valid)/i.test(text)) {
       return {state: 'validity_popup', text: text.substring(0, 240)};
+    }
+    if (lower.indexOf('no data found') !== -1) {
+      return {state: 'manual_entry', text: text.substring(0, 240)};
+    }
+    if (lower.indexOf('chassis') !== -1) {
+      return {state: 'chassis_bug', text: text.substring(0, 240)};
     }
   }
   var district = document.querySelector('select#floatingDistrict');
@@ -211,9 +218,17 @@ async def wait_for_owner_info_outcome(
     timeout: float = OWNER_OUTCOME_POLL_SECS,
     tick: float = OWNER_OUTCOME_POLL_TICK_SECS,
 ) -> str:
-    """Poll after Get Details for one of: district_ready / pending_popup /
-    validity_popup / timeout. Never raises — the caller branches. The popup
-    text rides along in the StepLog so the run-log shows the routing."""
+    """Poll after Get Details for one of: district_ready / manual_entry /
+    pending_popup / validity_popup / timeout. Never raises — the caller
+    branches. The popup text rides along in the StepLog so the run-log shows the
+    routing.
+
+    manual_entry = VAHAN had no RC data ("No data found for this vehicle
+    number..") — the caller fetches the RC record on demand and fills the
+    owner/vehicle forms by hand.
+
+    A spurious "enter chassis no." popup (a known gov-site bug) is clicked away
+    inline and polling continues, so it never turns into a false timeout."""
     started = time.monotonic()
     deadline = started + timeout
     last_state, last_text = "pending", ""
@@ -235,6 +250,25 @@ async def wait_for_owner_info_outcome(
                 )
             )
             return "district_ready"
+        if state == "manual_entry":
+            log.record(
+                StepLog(
+                    index=log.next_index(),
+                    name=name,
+                    status=StepStatus.OK,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    value=f"manual_entry: {last_text[:120]}",
+                )
+            )
+            return "manual_entry"
+        if state == "chassis_bug":
+            # Spurious portal popup — click OK and keep polling for the real
+            # outcome (district will render once it's dismissed).
+            await dismiss_chassis_bug_popup(
+                session, log=log, name=f"{name}.chassis_bug"
+            )
+            await asyncio.sleep(tick)
+            continue
         if state in ("pending_popup", "validity_popup"):
             log.record(
                 StepLog(

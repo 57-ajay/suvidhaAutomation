@@ -71,8 +71,15 @@ from engine.types import (
 from lifecycle.status import Status
 from redis_client import job_key
 
+import api_client
 from .. import pending_clear
 from ..captcha_user import solve_captcha
+from ..manual_entry import (
+    dismiss_chassis_bug_popup,
+    dismiss_no_data_popup,
+    fill_owner_info_manual,
+    fill_vehicle_info_manual,
+)
 from ..extract_amount import extract_and_save_border_tax_amount
 from ..payment_wait import (
     DEFAULT_POSITIVE_PATTERNS,
@@ -130,6 +137,14 @@ def _classify_popup(text: str) -> str:
     everything else (validity failures, no-tax-due, unknown errors)."""
     up_text = (text or "").upper()
     if any(h in up_text for h in BENIGN_POPUP_HINTS):
+        return "benign"
+    # A spurious "enter chassis no." popup is a known gov-site bug — click OK
+    # and continue. Benign UNLESS the popup is really a validity/pending blocker
+    # that merely happens to mention the chassis.
+    if "CHASSIS" in up_text and not any(
+        k in up_text
+        for k in ("INSURANCE", "FITNESS", "PUCC", "EXPIRED", "RENEW", "PENDING")
+    ):
         return "benign"
     return "blocking"
 
@@ -413,6 +428,10 @@ async def select_service(ctx: RunContext) -> None:
 
 async def owner_info(ctx: RunContext) -> None:
     p = ctx.params
+    # Fresh per attempt: a pending-clear RestartFrom re-enters this phase, so the
+    # manual-entry flag must reflect THIS Get-Details outcome, never a prior one
+    # (a stale True would make vehicle_info hand-fill a VAHAN-prefilled form).
+    ctx.scratch["is_manual_entry"] = False
     await wait_for_selector(
         ctx.session,
         SEL_VEHICLE_INPUT,
@@ -476,7 +495,43 @@ async def owner_info(ctx: RunContext) -> None:
             )
         raise RestartFrom("open_portal", "pending transaction cleared")
 
-    # outcome == district_ready
+    if outcome == "manual_entry":
+        # VAHAN returned "No data found" — it has no RC record for this vehicle.
+        # Dismiss the popup, fetch the RC record on demand, and fill owner-info
+        # by hand. The district/checkpost selection below then runs identically
+        # to the VAHAN-success path. A flag + the record ride forward in
+        # ctx.scratch so vehicle_info knows to fill that step manually too.
+        await dismiss_no_data_popup(
+            ctx.session, log=ctx.log, name="p3.dismiss_no_data"
+        )
+        vd = await api_client.fetch_vehicle_details(
+            request_id=p.requestId,
+            driver_id=p.driverId,
+            vehicle_number=p.vehicleNumber,
+        )
+        if not vd:
+            raise ScriptedAbort(
+                f"VAHAN has no data for {p.vehicleNumber} and the RC lookup "
+                "returned no record, so the owner/vehicle details can't be "
+                "filled — check the vehicle number or try again shortly",
+                terminal="cancelled",
+            )
+        ctx.scratch["is_manual_entry"] = True
+        ctx.scratch["manual_vehicle_details"] = vd
+        # A stacked "enter chassis no." popup can sit on top of the form here.
+        await dismiss_chassis_bug_popup(
+            ctx.session, log=ctx.log, name="p3.dismiss_chassis_bug"
+        )
+        await fill_owner_info_manual(
+            ctx.session,
+            vd,
+            log=ctx.log,
+            name_prefix="p3.manual",
+            mobile_number=p.mobileNumber or "0000000000",
+        )
+
+    # outcome == district_ready (VAHAN auto-filled) or manual_entry (owner-info
+    # filled just above) — either way, select district + checkpost next.
     try:
         await select_by_text(
             ctx.session,
@@ -553,6 +608,37 @@ async def vehicle_info(ctx: RunContext) -> None:
         name="p4.wait_vehicle_info_page",
         timeout=30,
     )
+
+    # Manual-entry path (VAHAN had no RC data): fill the ENTIRE vehicle-info
+    # step from the RC record fetched in owner_info — Type → Class → Category →
+    # Permit (dependent cascade), Seating, Sleeper, Service Type, validity
+    # dates, Permit No. UP (and MP, which reuses this phase) have a Vehicle
+    # Category select, no Distance field, and plain <input type="date">.
+    if ctx.scratch.get("is_manual_entry"):
+        await fill_vehicle_info_manual(
+            ctx.session,
+            ctx.scratch.get("manual_vehicle_details") or {},
+            p,
+            log=ctx.log,
+            name_prefix="p4.manual",
+            has_category=True,
+            has_distance=False,
+            datetime_local_dates=False,
+        )
+        await abort_if_popup_text(
+            ctx.session,
+            VALIDITY_KEYWORDS,
+            validity_abort,
+            log=ctx.log,
+            name="p4.check_validity_after_manual_fill",
+            close_selector=VALIDITY_CLOSE,
+        )
+        await click_by_text(
+            ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+        )
+        await _abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
+        await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
+        return
 
     # RC data sometimes pre-fills Permit Type; Service Type options are
     # conditional on it. Fill only when empty, primary -> fallback.

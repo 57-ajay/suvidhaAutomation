@@ -120,6 +120,7 @@ from ..tax_dates import fill_tax_dates
 # phases (incl. sbiepay_upi) and the shared selectors/helpers verbatim. HP
 # overrides only the phases noted in the module docstring. (No import cycle:
 # up.py never imports hp.py.)
+from ..manual_entry import fill_vehicle_info_manual
 from .up import (
     PHASE_GAP_SECS,
     PERMIT_SET_TIMEOUT_SECS,
@@ -228,6 +229,35 @@ async def vehicle_info(ctx: RunContext) -> None:
         name="p4.wait_vehicle_info_page",
         timeout=30,
     )
+
+    # Manual-entry path (VAHAN had no RC data): fill the ENTIRE vehicle-info
+    # step from the RC record fetched in owner_info. HP has a Vehicle Category
+    # select, no Distance field, and plain <input type="date"> validity inputs.
+    if ctx.scratch.get("is_manual_entry"):
+        await fill_vehicle_info_manual(
+            ctx.session,
+            ctx.scratch.get("manual_vehicle_details") or {},
+            p,
+            log=ctx.log,
+            name_prefix="p4.manual",
+            has_category=True,
+            has_distance=False,
+            datetime_local_dates=False,
+        )
+        await abort_if_popup_text(
+            ctx.session,
+            VALIDITY_KEYWORDS,
+            validity_abort,
+            log=ctx.log,
+            name="p4.check_validity_after_manual_fill",
+            close_selector=VALIDITY_CLOSE,
+        )
+        await click_by_text(
+            ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+        )
+        await _abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
+        await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
+        return
 
     # HP's RC pre-fills most fields; the spec is "keep a filled value, set only
     # an empty one". (Same surface as PB — HP has no Distance field either.)

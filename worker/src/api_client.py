@@ -155,6 +155,38 @@ async def save_receipt(
     )
 
 
+async def fetch_vehicle_details(
+    *,
+    request_id: str,
+    driver_id: str,
+    vehicle_number: str,
+) -> dict | None:
+    """Resolve the RC record for a vehicle on demand.
+
+    Called by the owner-info phase the moment the parivahan portal shows the
+    "No data found for this vehicle number" popup (VAHAN has nothing). The API
+    triggers a live RC lookup (refreshing Firestore vehicleDetails/{REGNO}) and
+    returns the persisted record so the worker can fill the owner-info +
+    vehicle-info forms manually.
+
+    Returns the RC record dict, or None when the RC service has no usable data
+    (the caller then ends the run with a clear, driver-readable message). The
+    45s timeout covers the cloud function's worst-case government-RC latency
+    (it self-bounds at 30s) plus the post-write read poll.
+    """
+    data = await _post(
+        "/api/internal/vehicle-details",
+        {
+            "requestId": request_id,
+            "driverId": driver_id,
+            "vehicleNumber": vehicle_number,
+        },
+        timeout=45.0,
+    )
+    vd = data.get("vehicleDetails") if isinstance(data, dict) else None
+    return vd if isinstance(vd, dict) else None
+
+
 async def job_completed(
     *,
     job_id: str,

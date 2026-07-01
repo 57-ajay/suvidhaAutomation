@@ -8,6 +8,7 @@ import { handleSaveQR } from "../internal/qr";
 import { handleSaveCaptcha, handleCaptchaResult } from "../internal/captcha";
 import { handleSaveReceipt } from "../internal/receipt";
 import { handleJobCompleted } from "../internal/jobCompleted";
+import { handleVehicleDetails } from "../internal/vehicleDetails";
 import { setAgentStatus } from "../internal/requestDoc";
 import { isStatus, type Status } from "../lifecycle/statuses";
 
@@ -57,6 +58,9 @@ export async function handleInternal(
     }
     if (pathname === "/api/internal/job-completed") {
         return json(await handleJobCompleted(await readJson(req) as any));
+    }
+    if (pathname === "/api/internal/vehicle-details") {
+        return json(await handleVehicleDetails(await readJson(req) as any));
     }
 
     return null;
