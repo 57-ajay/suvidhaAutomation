@@ -94,6 +94,19 @@ async def amain(job_id: str, display: str) -> None:
             ctx_task = "puc-certificate"
             max_restarts = PUC_MAX_RETRIES
             await reporter.set_status(Status.AI_AGENT_STARTED)
+
+        elif task_id == "challan-settlement":
+            # No-payment quotation scan on vcourts.gov.in. Phase list is built
+            # per-job from the client's challan numbers (one phase per
+            # department); each department phase is internally fault-isolated.
+            from tasks.challan_settlement.params import ChallanSettlementParams
+            from tasks.challan_settlement.flow import make_phases
+
+            params = ChallanSettlementParams.from_job(params_raw)
+            phases = make_phases(params)
+            ctx_task = "challan-settlement"
+            await reporter.set_status(Status.AI_AGENT_STARTED)
+
         elif task == "verifyPendingPayment":
             from tasks.border_tax.verify_pending import VerifyPendingParams
             from tasks.border_tax.registry import resolve_verify_phases

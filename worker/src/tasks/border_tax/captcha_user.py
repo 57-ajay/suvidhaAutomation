@@ -178,12 +178,14 @@ async def _try_ai_captcha(
     is_rejected: Callable[[], Awaitable[bool]],
     canvas_scope: str | None,
     image_selector: str | None = None,
+    max_ai_attempts: int | None = None,
 ) -> bool:
     """Silent Vertex-OCR attempts. No save-captcha, no captcha status, no
     captcha-result — the client must never see a captcha the AI is solving.
     Returns True once the submit is accepted; False when OCR is exhausted (or
     capture itself fails), so the caller can hand off to a human."""
-    for attempt in range(1, MAX_AI_CAPTCHA_ATTEMPTS + 1):
+    attempts = max_ai_attempts or MAX_AI_CAPTCHA_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         b64 = await _capture_readable(
             ctx,
             refresh_selector=refresh_selector,
@@ -236,7 +238,7 @@ async def _try_ai_captcha(
             index=ctx.log.next_index(),
             name="captcha.ai_exhausted",
             status=StepStatus.HANDED_OFF,
-            value=f"{MAX_AI_CAPTCHA_ATTEMPTS} OCR attempts failed; falling back",
+            value=f"{attempts} OCR attempts failed; falling back",
         )
     )
     return False
@@ -383,6 +385,7 @@ async def solve_captcha(
     terminal: str = "cancelled",  # terminal when the seam is exhausted
     abort_message: str | None = None,
     image_selector: str | None = None,
+    max_ai_attempts: int | None = None,
 ) -> None:
     mode = (mode or CAPTCHA_MODE).lower()
 
@@ -395,6 +398,7 @@ async def solve_captcha(
             is_rejected=is_rejected,
             canvas_scope=canvas_scope,
             image_selector=image_selector,
+            max_ai_attempts=max_ai_attempts,
         ):
             return
         await dismiss_popup(ctx.session, log=ctx.log, name="captcha.ai_handoff")

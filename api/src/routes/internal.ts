@@ -11,6 +11,7 @@ import { handleJobCompleted } from "../internal/jobCompleted";
 import { handleVehicleDetails } from "../internal/vehicleDetails";
 import { setAgentStatus } from "../internal/requestDoc";
 import { isStatus, type Status } from "../lifecycle/statuses";
+import { setChallanCheckingFlag, handleSaveChallanQuotations } from "../internal/challanSettlement";
 
 export async function handleInternal(
     pathname: string,
@@ -61,6 +62,12 @@ export async function handleInternal(
     }
     if (pathname === "/api/internal/vehicle-details") {
         return json(await handleVehicleDetails(await readJson(req) as any));
+    }
+    if (pathname === "/api/internal/challan-settlement/flag") {
+        return json(await setChallanCheckingFlag(await readJson(req) as any));
+    }
+    if (pathname === "/api/internal/challan-settlement/quotations") {
+        return json(await handleSaveChallanQuotations(await readJson(req) as any));
     }
 
     return null;

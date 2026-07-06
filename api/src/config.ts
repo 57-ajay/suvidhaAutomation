@@ -43,6 +43,13 @@ export const config = {
     // enqueue work or intervene. GET reads / the ops dashboard are unaffected and
     // should be restricted at the proxy.
     publicApiKey: process.env.PUBLIC_API_KEY ?? "",
+
+    // Challan-settlement task: status/terminal writes go to the vehicle's
+    // challans doc. requestId == normalized vehicle number by convention.
+    challanDocPathTemplate:
+        process.env.CHALLAN_DOC_PATH_TEMPLATE ?? "challans/{requestId}",
+    challanGcsPrefix:
+        process.env.CHALLAN_GCS_PREFIX ?? "driverUtilitiesRequests/challanSettlement",
 } as const;
 
 
@@ -63,6 +70,7 @@ export function qrValidSecsForState(stateCode?: string): number {
 const DOC_PATH_TEMPLATE_BY_TASK: Record<string, string> = {
     "border-tax": config.requestDocPathTemplate,
     "puc-certificate": config.pucDocPathTemplate,
+    "challan-settlement": config.challanDocPathTemplate,
 };
 
 export function requestDocPath(
@@ -80,6 +88,7 @@ export function requestDocPath(
 const GCS_PREFIX_BY_TASK: Record<string, string> = {
     "border-tax": config.gcsPrefix,
     "puc-certificate": config.pucGcsPrefix,
+    "challan-settlement": config.challanGcsPrefix,
 };
 
 export function gcsPrefixForTask(task: string = "border-tax"): string {

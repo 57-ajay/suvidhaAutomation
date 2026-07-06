@@ -219,3 +219,58 @@ async def job_completed(
             "task": task,
         },
     )
+
+
+# ─── challan-settlement ─────────────────────────────────────────────────
+
+
+async def challan_settlement_flag(
+    *,
+    request_id: str,
+    driver_id: str,
+    vehicle_number: str,
+    checking: bool,
+    summary: str | None = None,
+    requested_challans: list[str] | None = None,
+    task: str = "challan-settlement",
+) -> dict:
+    """Set / clear aiCheckingSettlement on challans/{VEH} (merge)."""
+    return await _post(
+        "/api/internal/challan-settlement/flag",
+        {
+            "requestId": request_id,
+            "driverId": driver_id,
+            "vehicleNumber": vehicle_number,
+            "checking": checking,
+            "summary": summary,
+            "requestedChallans": requested_challans,
+            "task": task,
+        },
+    )
+
+
+async def save_challan_quotations(
+    *,
+    job_id: str,
+    request_id: str,
+    driver_id: str,
+    vehicle_number: str,
+    department: str,
+    records: list[dict],
+    task: str = "challan-settlement",
+) -> dict:
+    """Persist quotations under challans/{VEH}/subChallans/{challanId}.
+    records: [{"challanId": str, "amount": int, "isExtra": bool}]"""
+    return await _post(
+        "/api/internal/challan-settlement/quotations",
+        {
+            "jobId": job_id,
+            "requestId": request_id,
+            "driverId": driver_id,
+            "vehicleNumber": vehicle_number,
+            "department": department,
+            "records": records,
+            "task": task,
+        },
+        timeout=90.0,
+    )

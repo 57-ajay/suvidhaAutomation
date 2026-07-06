@@ -42,6 +42,7 @@ _ALLOWED: dict[str, set[str]] = {
         Status.CAPTCHA_SOLVING,
         Status.SETTING_UP_PAYMENT_REQUEST,
         Status.GENERATING_RECEIPT,
+        Status.COMPLETED,
         Status.CANCELLED,
     },
     Status.PENDING_TRANSACTION: {
@@ -57,6 +58,7 @@ _ALLOWED: dict[str, set[str]] = {
     Status.CAPTCHA_SOLVING: {
         Status.SETTING_UP_PAYMENT_REQUEST,
         Status.GENERATING_RECEIPT,  # PUC: captcha accepted -> capture certificate
+        Status.COMPLETED,
         Status.CANCELLED,
     },
     Status.SETTING_UP_PAYMENT_REQUEST: {

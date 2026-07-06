@@ -27,7 +27,7 @@ import {
     STATUS,
     TOP_LEVEL_STATUS,
 } from "../lifecycle/statuses";
-
+import { setChallanCheckingFlag } from "./challanSettlement";
 /** Firestore Timestamp for `d` (default: now). Use this for everything we
  *  persist. No IST shift — a Timestamp is an absolute instant. */
 export function ts(d: Date = new Date()): Timestamp {
@@ -272,4 +272,21 @@ export async function applyTerminal(opts: ApplyTerminalOpts): Promise<void> {
 
         tx.set(ref, topLevel, { merge: true });
     });
+
+    // Challan-settlement: the client's triggers key off aiCheckingSettlement,
+    // so EVERY terminal — clean, crashed, orphan-reaped, or cancelled while
+    // still queued — drops the flag. Idempotent merge; a failure here is
+    // logged, never thrown (the terminal itself already landed).
+    if ((opts.task ?? "") === "challan-settlement") {
+        const f = await setChallanCheckingFlag({
+            vehicleNumber: requestId,
+            checking: false,
+            summary: opts.summary ?? opts.error ?? undefined,
+        });
+        if (!f.ok) {
+            console.error(
+                `[applyTerminal] challan flag clear failed for ${requestId}: ${f.error}`,
+            );
+        }
+    }
 }

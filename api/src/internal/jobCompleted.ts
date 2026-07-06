@@ -9,7 +9,7 @@
 
 import { applyTerminal, saveAgentCost, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
-
+import { setChallanCheckingFlag } from "./challanSettlement";
 export interface JobCompletedInput {
     jobId: string;
     requestId: string;
@@ -88,6 +88,15 @@ export async function handleJobCompleted(input: JobCompletedInput) {
         console.error(
             `[jobCompleted] terminal write rejected for ${requestId}: ${e.message}`,
         );
+        if ((input.task ?? "") === "challan-settlement") {
+            await setChallanCheckingFlag({
+                vehicleNumber: requestId,
+                checking: false,
+                summary: input.summary ?? input.error ?? undefined,
+            }).then((f) => {
+                if (!f.ok) console.error(`[jobCompleted] challan flag clear failed: ${f.error}`);
+            });
+        }
         return { ok: false, error: e.message };
     }
 }

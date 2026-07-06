@@ -13,6 +13,7 @@ import { json, readJson } from "../lib/http";
 import { getStateValidator, supportedStates } from "../validators";
 import { checkEligibility } from "../internal/eligibility";
 import { setAgentStatus } from "../internal/requestDoc";
+import { handleChallanSettlementRun } from "./challanSettlementRun";
 import { STATUS } from "../lifecycle/statuses";
 
 const ACTIVE = new Set(["queued", "running", "waiting_for_human"]);
@@ -24,9 +25,20 @@ export async function handleRun(req: Request): Promise<Response> {
     // Mandatory per product spec; accepted top-level or inside params.
     const source: string | undefined = body.source ?? (rawParams.source as string);
 
-    if (taskId !== "border-tax" && taskId !== "puc-certificate") {
+    if (taskId !== "border-tax" && taskId !== "puc-certificate" && taskId !== "challan-settlement") {
         return json({ ok: false, error: `unsupported taskId: ${taskId}` }, 400);
     }
+
+    if (taskId === "challan-settlement") {
+        if (source !== "app" && source !== "web") {
+            return json(
+                { ok: false, error: `unsupported source: ${source}` },
+                400,
+            );
+        }
+        return await handleChallanSettlementRun(rawParams, source);
+    }
+
     if (!source) {
         return json(
             {
