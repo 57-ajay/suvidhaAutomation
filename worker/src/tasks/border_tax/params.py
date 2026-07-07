@@ -41,6 +41,17 @@ class BorderTaxParams:
     serviceType: str
     # HR fills #floatingDistance only when the RC left it empty; no price effect.
     distance: str = "500"
+    # Optional 24h "HH:MM" (IST) stamped onto Tax From / Tax Upto in the
+    # datetime-local states (PB/HR/HP) instead of "IST now", so a driver can
+    # book a start a few hours ahead of fill time. ONE time for BOTH ends —
+    # the From->Upto span must stay an exact 24h multiple or the portal bills
+    # the extra minute as a full extra day (see tax_dates.py). "" -> the
+    # runner stamps the current IST time (the pre-taxTime behavior). Date
+    # states (UP/MP) never receive it (their API validators strip it). A
+    # same-day past time is clamped to now at fill time (see
+    # tax_dates.resolve_hhmm). Format is validated by the API validator
+    # (normalizeTaxTime); resolve_hhmm re-guards defensively.
+    taxTime: str = ""
 
     @property
     def fills_tax_upto(self) -> bool:
@@ -83,4 +94,5 @@ class BorderTaxParams:
             ),
             serviceType=str(raw.get("serviceType", "Air Conditioned Service")),
             distance=str(raw.get("distance", "1000")),
+            taxTime=str(raw.get("taxTime", "")).strip(),
         )

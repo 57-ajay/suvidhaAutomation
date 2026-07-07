@@ -23,6 +23,7 @@ import {
     fail,
     str,
     normalizeDate,
+    normalizeTaxTime,
     isVehicleNumber,
     normalizeVehicleNumber,
 } from "../types";
@@ -65,6 +66,9 @@ export const hpValidator: StateValidator = {
         const paymentMethod = str(raw.paymentMethod)?.toUpperCase();
         const requestId = str(raw.requestId);
         const driverId = str(raw.driverId);
+        // Optional 24h "HH:MM" the worker stamps onto the datetime-local Tax
+        // From / Tax Upto instead of "IST now". null = not sent (fine).
+        const taxTime = normalizeTaxTime(raw.taxTime);
 
         if (!vehicleNumber) missing.push("vehicleNumber");
         if (!taxMode) missing.push("taxMode");
@@ -80,6 +84,12 @@ export const hpValidator: StateValidator = {
             } else {
                 missing.push("taxFrom");
             }
+        }
+        if (taxTime === undefined) {
+            invalid.push({
+                field: "taxTime",
+                reason: 'expected 24h "HH:MM", e.g. "09:30" or "14:00"',
+            });
         }
 
         // taxUpto only matters in DAYS mode; QUARTERLY / YEARLY are portal-locked.
@@ -134,6 +144,10 @@ export const hpValidator: StateValidator = {
             // Stripped for QUARTERLY / YEARLY: empty tells the worker the portal
             // auto-fills (and locks) this field.
             taxUpto: needsTaxUpto ? taxUpto! : "",
+            // Optional; shipped only when the caller sent a valid time. The
+            // worker stamps it on BOTH ends (a same-day past time is clamped
+            // to now at fill — see worker tax_dates.resolve_hhmm).
+            ...(taxTime ? { taxTime } : {}),
             entryDistrict: (
                 str(raw.entryDistrict) ?? DEFAULTS.entryDistrict
             ).toUpperCase(),

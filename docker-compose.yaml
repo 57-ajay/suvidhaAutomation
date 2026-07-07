@@ -1,7 +1,17 @@
+# json-file logs are unbounded by default; on a busy worker they filled the
+# host disk until `docker compose down && up` became routine maintenance.
+# Cap them on every service.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   redis-pivot:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-pivot-data:/data
@@ -11,6 +21,7 @@ services:
   api:
     build: ./api
     restart: unless-stopped
+    logging: *default-logging
     env_file: .env
     environment:
       REDIS_URL: redis://redis-pivot:6379
@@ -29,6 +40,7 @@ services:
   worker:
     build: ./worker
     restart: unless-stopped
+    logging: *default-logging
     env_file: .env
     environment:
       REDIS_URL: redis://redis-pivot:6379

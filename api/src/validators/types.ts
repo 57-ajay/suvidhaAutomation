@@ -77,6 +77,23 @@ export function normalizeDate(v: unknown): string | undefined {
     return undefined;
 }
 
+/** Optional 24h "HH:MM" for the datetime-local states (PB/HR/HP): the time
+ * the worker stamps onto Tax From / Tax Upto instead of "IST now". Accepts
+ * "H:MM" / "HH:MM" (a ":SS" tail is tolerated and dropped); returns
+ * zero-padded "HH:MM". Absent/blank -> null (worker stamps IST now at fill
+ * time). Malformed -> undefined so the caller emits a FieldError. ONE time
+ * for BOTH ends — the worker reuses it so the From->Upto span stays an exact
+ * 24h multiple (a minute over a whole day bills a full extra day). Date
+ * states (UP/MP) simply never read it, so a client-sent value is stripped. */
+export function normalizeTaxTime(v: unknown): string | null | undefined {
+    const s = str(v);
+    if (!s) return null;
+    const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(s);
+    if (!m) return undefined;
+    if (Number(m[1]) > 23 || Number(m[2]) > 59) return undefined;
+    return `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
+}
+
 const VEHICLE_RE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{1,4}$/;
 
 export function normalizeVehicleNumber(s: string): string {

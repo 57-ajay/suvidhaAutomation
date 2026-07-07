@@ -29,5 +29,13 @@ def build_browser_session(display: str) -> BrowserSession:
         args=args,
         env={"DISPLAY": display},
         keep_alive=False,
+        # Explicit ephemeral profile per session (browser-use mkdtemp()s one
+        # per launch when None). NEVER let this fall back to the library's
+        # shared default profile: Chrome's ProcessSingleton allows exactly
+        # one instance per profile dir, so a shared dir means one stale
+        # SingletonLock fails every launch on every slot with the 30s CDP
+        # timeout until the container is recreated — the old "works after
+        # docker compose down && up, then dies again" bug.
+        user_data_dir=None,
     )
     return BrowserSession(browser_profile=profile)

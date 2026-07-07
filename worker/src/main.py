@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -27,6 +28,17 @@ from slots import SlotPool, live_url
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 TERMINALS = {"done", "cancelled", "failed", "partial"}
 CANCEL_GRACE_SECS = 20
+
+
+def _killpg(proc: subprocess.Popen) -> None:
+    """SIGKILL the job's whole process group. run_job.py is spawned with
+    start_new_session=True, so every Chromium it launched shares its pgid —
+    proc.kill() alone would only reach run_job itself and leave the browsers
+    running."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def finalize_orphan(job_id: str, r) -> None:
@@ -102,6 +114,7 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
         if slot is None:
             time.sleep(1.0)
 
+    proc: subprocess.Popen | None = None
     try:
         r.hset(
             key,
@@ -114,6 +127,10 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
             [sys.executable, os.path.join(SRC_DIR, "run_job.py"), job_id, slot.display],
             cwd=SRC_DIR,
             env={**os.environ, "DISPLAY": slot.display},
+            # Own process group: run_job's Chromiums share its pgid, so
+            # _killpg can nuke the whole tree. Without this a terminate/kill
+            # reaches only run_job.py and orphans every browser it spawned.
+            start_new_session=True,
         )
 
         graced_at: float | None = None
@@ -125,11 +142,11 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
                     f"[main] job {job_id} exceeded the hard deadline "
                     f"({hard_deadline}s); terminating wedged subprocess"
                 )
-                proc.terminate()
+                proc.terminate()  # SIGTERM: run_job cancels + closes the browser
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _killpg(proc)  # backstop: nuke the whole group
                 break
             if r.hget(key, "status") == "cancelled":
                 if graced_at is None:
@@ -140,15 +157,27 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
                     )
                 elif time.monotonic() - graced_at > CANCEL_GRACE_SECS:
                     print(f"[main] grace expired; terminating {job_id}")
-                    proc.terminate()
+                    proc.terminate()  # SIGTERM: run_job cancels + closes the browser
                     try:
                         proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
+                        _killpg(proc)  # backstop: nuke the whole group
                     break
             time.sleep(1.0)
         proc.wait()
     finally:
+        # ALWAYS nuke the job's whole process group, on every exit path —
+        # not just cancellation. browser-use 0.12.x leaks the Chromium
+        # subprocess when a BrowserLaunchEvent is cancelled at the 30s bubus
+        # timeout (the process is spawned, then the handler is cancelled
+        # while awaiting _wait_for_cdp_url — before self._subprocess is ever
+        # assigned, so BrowserKillEvent has nothing to kill). The orphan sits
+        # on RAM + its /tmp profile forever, making the NEXT launch slower,
+        # which times out too → death spiral until container restart. This
+        # killpg is the fix for that spiral.
+        if proc is not None:
+            _killpg(proc)
+            time.sleep(0.5)  # let killed procs actually die before the sweep
         pool.release(slot, job_id)
         finalize_orphan(job_id, r)
 

@@ -10,13 +10,59 @@ in VNC_TOKEN_DIR, so the live URL is stable per job:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
 import time
 
+import psutil  # already in the venv (browser-use dependency)
+
 from config import (
     BASE_DISPLAY, BASE_VNC_PORT, DOMAIN, SCREEN_GEOMETRY, VNC_TOKEN_DIR,
 )
+
+# Prefixes of the temp Chromium profiles browser-use mkdtemp()s per launch.
+# When a launch is cancelled at the bubus timeout, the dir is never cleaned,
+# and leaked profiles eat the container's disk until every subsequent launch
+# starts timing out.
+PROFILE_DIR_PREFIXES = ("browser-use-user-data-dir-", "browseruse-tmp-")
+
+
+def sweep_orphan_profile_dirs(min_age_secs: int = 60) -> int:
+    """Delete leaked Chromium temp profiles under /tmp.
+
+    Only removes dirs that (a) are not referenced in any live process's
+    cmdline and (b) are older than min_age_secs — so profiles belonging to
+    jobs still running on other slots are never touched.
+    """
+    in_use: set[str] = set()
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            for arg in proc.info["cmdline"] or []:
+                if any(pfx in arg for pfx in PROFILE_DIR_PREFIXES):
+                    # e.g. --user-data-dir=/tmp/browser-use-user-data-dir-xyz
+                    in_use.add(arg.split("=", 1)[-1])
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+            continue
+
+    removed = 0
+    now = time.time()
+    for entry in os.listdir("/tmp"):
+        if not any(entry.startswith(pfx) for pfx in PROFILE_DIR_PREFIXES):
+            continue
+        path = f"/tmp/{entry}"
+        if any(path in used for used in in_use):
+            continue
+        try:
+            if now - os.path.getmtime(path) < min_age_secs:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed += 1
+    if removed:
+        print(f"[slots] Swept {removed} orphaned Chromium profile dir(s) from /tmp")
+    return removed
 
 
 def live_url(job_id: str) -> str:
@@ -86,4 +132,8 @@ class SlotPool:
         with self._lock:
             if slot.index not in self._free:
                 self._free.append(slot.index)
+        # main.py killpg'd the job's process group and waited 0.5s before
+        # releasing, so anything still holding a profile dir here is a
+        # genuine cross-slot survivor the sweep must leave alone.
+        sweep_orphan_profile_dirs()
         print(f"[slots] slot {slot.index} released (job={job_id})")

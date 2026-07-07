@@ -433,10 +433,11 @@ async def tax_info(ctx: RunContext) -> None:
         )
 
     # Tax From (+ Tax Upto in DAYS mode). HR's fields are datetime-local;
-    # fill_tax_dates stamps the current IST time once and reuses it for both
-    # ends, so the From->Upto span stays an exact 24h multiple (HR is
-    # NO_SAME_DAY, so DAYS taxUpto is already taxFrom + duration >= tomorrow,
-    # above the field min). See tax_dates.py.
+    # fill_tax_dates resolves the time once — the caller-requested taxTime
+    # when usable (a same-day past time is clamped to now), else the current
+    # IST time — and reuses it for both ends, so the From->Upto span stays an
+    # exact 24h multiple (HR is NO_SAME_DAY, so DAYS taxUpto is already
+    # taxFrom + duration >= tomorrow, above the field min). See tax_dates.py.
     await fill_tax_dates(
         ctx.session,
         "HR",
@@ -446,6 +447,7 @@ async def tax_info(ctx: RunContext) -> None:
         p.taxUpto,
         fills_upto=p.fills_tax_upto,
         log=ctx.log,
+        tax_time=p.taxTime,
     )
 
     if not p.fills_tax_upto:

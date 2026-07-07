@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 import traceback
 
@@ -334,13 +335,29 @@ async def amain(job_id: str, display: str) -> None:
     print(f"[run_job] job={job_id} -> {outcome.status}: {outcome.summary}")
 
 
+async def _runner(job_id: str, display: str) -> None:
+    """amain() wrapped so SIGTERM (the orchestrator's grace-expiry or
+    hard-deadline terminate) CANCELS the task instead of killing the process
+    outright. Python's default SIGTERM handler exits immediately — finally
+    blocks never run, the browser is never closed, and the Chromium orphans
+    until main.py's killpg backstop. With this handler the CancelledError
+    unwinds through amain's finally, _close_browser kills the session, and
+    the orchestrator's orphan fallback writes the terminal."""
+    task = asyncio.ensure_future(amain(job_id, display))
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 def main() -> None:
     if len(sys.argv) < 3:
         print("usage: run_job.py <job_id> <display>")
         sys.exit(2)
     job_id, display = sys.argv[1], sys.argv[2]
     os.environ["DISPLAY"] = display
-    asyncio.run(amain(job_id, display))
+    asyncio.run(_runner(job_id, display))
 
 
 if __name__ == "__main__":
