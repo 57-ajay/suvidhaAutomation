@@ -1,6 +1,3 @@
-# json-file logs are unbounded by default; on a busy worker they filled the
-# host disk until `docker compose down && up` became routine maintenance.
-# Cap them on every service.
 x-logging: &default-logging
   driver: "json-file"
   options:
@@ -8,61 +5,62 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
-  redis-pivot:
+  nredis:
     image: redis:7-alpine
     restart: unless-stopped
     logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - redis-pivot-data:/data
+      - nredis-data:/data
     networks:
       - internal
 
-  api:
+  napi:
     build: ./api
     restart: unless-stopped
     logging: *default-logging
     env_file: .env
     environment:
-      REDIS_URL: redis://redis-pivot:6379
+      REDIS_URL: redis://nredis:6379
       GOOGLE_APPLICATION_CREDENTIALS: /secrets/service.json
     volumes:
       - ${SERVICE_ACCOUNT_FILE:-./service.json}:/secrets/service.json:ro
     depends_on:
-      - redis-pivot
+      - nredis
     networks:
       internal:
       proxy:
         aliases:
-          - pivot-api
+          - napi
     # ports: ["3000:3000"]
 
-  worker:
+  nworker:
     build: ./worker
     restart: unless-stopped
     logging: *default-logging
     env_file: .env
     environment:
-      REDIS_URL: redis://redis-pivot:6379
-      API_URL: http://api:3000
+      REDIS_URL: redis://nredis:6379
+      API_URL: http://napi:3000
       # CAPTCHA_DEBUG_DIR: /tmp/captcha-debug
     # volumes:
       # - ./captcha-debug:/tmp/captcha-debug
     shm_size: "2gb"
     depends_on:
-      - redis-pivot
-      - api
+      - nredis
+      - napi
     networks:
       internal:
       proxy:
         aliases:
-          - pivot-worker
+          - nworker
     # ports: ["6080:6080"]
 
 networks:
   internal:
   proxy:
     external: true
+    name: proxy-new
 
 volumes:
-  redis-pivot-data:
+  nredis-data:
