@@ -28,6 +28,23 @@ from slots import SlotPool, live_url
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 TERMINALS = {"done", "cancelled", "failed", "partial"}
 CANCEL_GRACE_SECS = 20
+DRAIN = threading.Event()
+ACTIVE = 0
+ACTIVE_LOCK = threading.Lock()
+
+
+def _on_sigterm(signum, frame):
+    print("[main] SIGTERM — draining: no new jobs, finishing running ones")
+    DRAIN.set()
+
+
+def _tracked_handle_job(job_id, pool, r):
+    global ACTIVE
+    try:
+        handle_job(job_id, pool, r)
+    finally:
+        with ACTIVE_LOCK:
+            ACTIVE -= 1
 
 
 def _killpg(proc: subprocess.Popen) -> None:
@@ -183,11 +200,27 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
 
 
 def main() -> None:
+    signal.signal(signal.SIGTERM, _on_sigterm)
     r = get_redis()
     pool = SlotPool(MAX_SLOTS)
     print(f"[main] border-tax worker up — {MAX_SLOTS} slots, queue '{QUEUE_KEY}'")
 
+    global ACTIVE
     while True:
+        if DRAIN.is_set():
+            with ACTIVE_LOCK:
+                n = ACTIVE
+            if n == 0:
+                print("[main] drain complete — exiting")
+                sys.exit(0)
+            print(f"[main] draining — {n} job(s) still running")
+            time.sleep(5)
+            continue
+
+        if pool.free_count() == 0:
+            time.sleep(1)
+            continue
+
         try:
             item = r.brpop(QUEUE_KEY, timeout=5)
         except Exception as e:
@@ -203,12 +236,41 @@ def main() -> None:
             continue
 
         print(f"[main] picked up job {job_id}")
+        with ACTIVE_LOCK:
+            ACTIVE += 1
         threading.Thread(
-            target=handle_job,
-            args=(job_id, pool, r),
-            daemon=True,
+            target=_tracked_handle_job, args=(job_id, pool, r), daemon=True
         ).start()
 
+
+#
+# def main() -> None:
+#     r = get_redis()
+#     pool = SlotPool(MAX_SLOTS)
+#     print(f"[main] border-tax worker up — {MAX_SLOTS} slots, queue '{QUEUE_KEY}'")
+#
+#     while True:
+#         try:
+#             item = r.brpop(QUEUE_KEY, timeout=5)
+#         except Exception as e:
+#             print(f"[main] redis brpop error: {e}; retrying")
+#             time.sleep(2.0)
+#             continue
+#         if not item:
+#             continue
+#
+#         job_id = item[1]
+#         if r.hget(job_key(job_id), "status") == "cancelled":
+#             finalize_orphan(job_id, r)
+#             continue
+#
+#         print(f"[main] picked up job {job_id}")
+#         threading.Thread(
+#             target=handle_job,
+#             args=(job_id, pool, r),
+#             daemon=True,
+#         ).start()
+#
 
 if __name__ == "__main__":
     main()

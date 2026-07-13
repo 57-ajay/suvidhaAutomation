@@ -1,0 +1,16 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaler
+  namespace: suvidha
+spec:
+  scaleTargetRef: { name: worker }
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  pollingInterval: 15
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.suvidha.svc.cluster.local:6379
+        listName: job:queue
+        listLength: "6"

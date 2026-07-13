@@ -18,7 +18,11 @@ import time
 import psutil  # already in the venv (browser-use dependency)
 
 from config import (
-    BASE_DISPLAY, BASE_VNC_PORT, DOMAIN, SCREEN_GEOMETRY, VNC_TOKEN_DIR,
+    BASE_DISPLAY,
+    BASE_VNC_PORT,
+    DOMAIN,
+    SCREEN_GEOMETRY,
+    VNC_TOKEN_DIR,
 )
 
 # Prefixes of the temp Chromium profiles browser-use mkdtemp()s per launch.
@@ -88,6 +92,10 @@ class SlotPool:
         self._lock = threading.Lock()
         os.makedirs(VNC_TOKEN_DIR, exist_ok=True)
 
+    def free_count(self) -> int:
+        with self._lock:
+            return len(self._free)
+
     def try_acquire(self, job_id: str) -> Slot | None:
         with self._lock:
             if not self._free:
@@ -95,21 +103,41 @@ class SlotPool:
             slot = self._slots[self._free.pop(0)]
         try:
             slot.xvfb = subprocess.Popen(
-                ["Xvfb", slot.display, "-screen", "0", SCREEN_GEOMETRY,
-                 "-nolisten", "tcp"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                [
+                    "Xvfb",
+                    slot.display,
+                    "-screen",
+                    "0",
+                    SCREEN_GEOMETRY,
+                    "-nolisten",
+                    "tcp",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             time.sleep(0.7)
             slot.vnc = subprocess.Popen(
-                ["x11vnc", "-display", slot.display, "-rfbport",
-                 str(slot.vnc_port), "-forever", "-shared", "-nopw", "-quiet",
-                 "-noxdamage"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                [
+                    "x11vnc",
+                    "-display",
+                    slot.display,
+                    "-rfbport",
+                    str(slot.vnc_port),
+                    "-forever",
+                    "-shared",
+                    "-nopw",
+                    "-quiet",
+                    "-noxdamage",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             with open(os.path.join(VNC_TOKEN_DIR, job_id), "w") as f:
                 f.write(f"{job_id}: localhost:{slot.vnc_port}\n")
-            print(f"[slots] job={job_id} -> slot {slot.index} "
-                  f"(display {slot.display}, vnc :{slot.vnc_port})")
+            print(
+                f"[slots] job={job_id} -> slot {slot.index} "
+                f"(display {slot.display}, vnc :{slot.vnc_port})"
+            )
             return slot
         except Exception as e:
             print(f"[slots] failed to start slot {slot.index}: {e}")

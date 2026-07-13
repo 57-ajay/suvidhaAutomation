@@ -1,0 +1,27 @@
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: gkep-cert
+spec:
+  domains:
+    - gkep.cabswale.in
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: suvidha-ingress
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: suvidha-ip
+    networking.gke.io/managed-certificates: gkep-cert
+spec:
+  rules:
+    - host: gkep.cabswale.in
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port: { number: 3000 }

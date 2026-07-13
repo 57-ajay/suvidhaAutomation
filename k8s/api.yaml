@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata: { labels: { app: api } }
+    spec:
+      containers:
+        - name: api
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/api:v1
+          ports: [{ containerPort: 3000 }]
+          envFrom: [{ secretRef: { name: suvidha-env } }]
+          env:
+            - { name: REDIS_URL, value: "redis://redis:6379" }
+            - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/secrets/service.json" }
+          volumeMounts: [{ name: firebase-sa, mountPath: /secrets, readOnly: true }]
+          readinessProbe:
+            httpGet: { path: /api/health, port: 3000 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: firebase-sa
+          secret: { secretName: firebase-sa }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+spec:
+  selector: { app: api }
+  ports: [{ port: 3000 }]
