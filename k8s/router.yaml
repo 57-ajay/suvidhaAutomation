@@ -1,0 +1,41 @@
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata: { name: router-backendconfig }
+spec:
+  timeoutSec: 3600
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: router }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: router } }
+  template:
+    metadata: { labels: { app: router } }
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: router
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/router:v3
+          ports: [{ containerPort: 8080 }]
+          env:
+            - { name: REDIS_URL, value: "redis://redis:6379" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "router-backendconfig"}'
+spec:
+  selector: { app: router }
+  ports: [{ port: 8080 }]

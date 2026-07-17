@@ -16,6 +16,7 @@ import { handleInternal } from "./routes/internal";
 import { supportedStates } from "./validators";
 import { DASHBOARD_HTML } from "./dashboard";
 import { handleVerifyPending } from "./routes/verifyPending";
+import { startZombieSweeper } from "./sweeper";
 
 const server = Bun.serve({
     port: config.port,
@@ -95,6 +96,8 @@ const server = Bun.serve({
     },
 });
 
+startZombieSweeper();
+process.on("SIGTERM", () => { console.log("[api] SIGTERM — exiting"); process.exit(0); });
 console.log(
     `[api] border-tax listening on :${server.port} (pipeline=${config.pipelineTag})`,
 );

@@ -32,6 +32,16 @@ DRAIN = threading.Event()
 ACTIVE = 0
 ACTIVE_LOCK = threading.Lock()
 
+LEASE_TTL_SECS = 90  # sweeper acts when now > leaseUntil
+LEASE_REFRESH_SECS = 30  # 3 missed refreshes = dead
+
+
+def _touch_lease(r, key: str) -> None:
+    try:
+        r.hset(key, "leaseUntil", str(int(time.time()) + LEASE_TTL_SECS))
+    except Exception as e:
+        print(f"[main] lease refresh failed: {e}")
+
 
 def _on_sigterm(signum, frame):
     print("[main] SIGTERM — draining: no new jobs, finishing running ones")
@@ -121,6 +131,7 @@ def finalize_orphan(job_id: str, r) -> None:
 
 def handle_job(job_id: str, pool: SlotPool, r) -> None:
     key = job_key(job_id)
+    _touch_lease(r, key)
 
     slot = None
     while slot is None:
@@ -129,6 +140,7 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
             return
         slot = pool.try_acquire(job_id)
         if slot is None:
+            _touch_lease(r, key)
             time.sleep(1.0)
 
     proc: subprocess.Popen | None = None
@@ -138,6 +150,8 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
             mapping={
                 "liveUrl": live_url(job_id),
                 "slotIndex": str(slot.index),
+                "podIp": os.environ.get("POD_IP", ""),
+                "leaseUntil": str(int(time.time()) + LEASE_TTL_SECS),
             },
         )
         proc = subprocess.Popen(
@@ -152,8 +166,13 @@ def handle_job(job_id: str, pool: SlotPool, r) -> None:
 
         graced_at: float | None = None
         started_at = time.monotonic()
+        last_lease = time.monotonic()
         hard_deadline = JOB_MAX_RUNTIME_SECS + 120  # run_job's own ceiling + grace
         while proc.poll() is None:
+            if time.monotonic() - last_lease >= LEASE_REFRESH_SECS:  # NEW
+                _touch_lease(r, key)
+                last_lease = time.monotonic()
+
             if time.monotonic() - started_at > hard_deadline:
                 print(
                     f"[main] job {job_id} exceeded the hard deadline "

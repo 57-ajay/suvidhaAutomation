@@ -14,10 +14,10 @@ spec:
       nodeSelector: { role: worker }
       tolerations:
         - { key: dedicated, operator: Equal, value: worker, effect: NoSchedule }
-      terminationGracePeriodSeconds: 600
+      terminationGracePeriodSeconds: 3600
       containers:
         - name: worker
-          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/worker:v3
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/worker:v5
           ports: [{ containerPort: 6080 }]
           envFrom: [{ secretRef: { name: suvidha-env } }]
           env:
@@ -25,6 +25,7 @@ spec:
             - { name: API_URL, value: "http://api:3000" }
             - { name: MAX_SLOTS, value: "12" }
             - { name: DOMAIN, value: "gkep.cabswale.in" }
+            - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
           volumeMounts: [{ name: dshm, mountPath: /dev/shm }]
           resources:
             requests: { cpu: "3", memory: 12Gi }

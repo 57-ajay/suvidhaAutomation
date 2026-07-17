@@ -3,13 +3,15 @@ kind: Deployment
 metadata: { name: api }
 spec:
   replicas: 1
+  strategy: { type: Recreate }
   selector: { matchLabels: { app: api } }
   template:
     metadata: { labels: { app: api } }
     spec:
+      terminationGracePeriodSeconds: 15  
       containers:
         - name: api
-          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/api:v1
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/api:v2
           ports: [{ containerPort: 3000 }]
           envFrom: [{ secretRef: { name: suvidha-env } }]
           env:
