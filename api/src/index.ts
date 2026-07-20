@@ -17,6 +17,7 @@ import { supportedStates } from "./validators";
 import { DASHBOARD_HTML } from "./dashboard";
 import { handleVerifyPending } from "./routes/verifyPending";
 import { startZombieSweeper } from "./sweeper";
+import { authorized, handleLogin, handleLogout, hasSession, LOGIN_HTML } from "./auth";
 
 const server = Bun.serve({
     port: config.port,
@@ -30,9 +31,9 @@ const server = Bun.serve({
 
         // Opt-in guard for public mutating routes. No-op unless PUBLIC_API_KEY
         // is set (so existing private deployments are unaffected).
-        const publicAuthorized = () =>
-            !config.publicApiKey ||
-            req.headers.get("X-Internal-Key") === config.publicApiKey;
+        const publicAuthorized = () => authorized(req);
+        // !config.publicApiKey ||
+        // req.headers.get("X-Internal-Key") === config.publicApiKey;
         const unauthorized = () => json({ ok: false, error: "unauthorized" }, 401);
 
         try {
@@ -43,7 +44,12 @@ const server = Bun.serve({
                     states: supportedStates(),
                 });
             }
+
+            if (req.method === "POST" && p === "/api/login") return await handleLogin(req);
+            if (req.method === "POST" && p === "/api/logout") return handleLogout();
+
             if (req.method === "GET" && p === "/api/tasks") {
+                if (!publicAuthorized()) return unauthorized();
                 return json({
                     tasks: [
                         { id: "border-tax", states: supportedStates() },
@@ -52,6 +58,7 @@ const server = Bun.serve({
                 });
             }
             if (req.method === "GET" && p === "/api/jobs") {
+                if (!publicAuthorized()) return unauthorized();
                 return await handleList(url.searchParams);
             }
             if (req.method === "POST" && p === "/api/run") {
@@ -63,7 +70,7 @@ const server = Bun.serve({
                 return handleVerifyPending(req);
             }
             if (req.method === "GET" && p === "/api/dashboard") {
-                return new Response(DASHBOARD_HTML, {
+                return new Response(hasSession(req) ? DASHBOARD_HTML : LOGIN_HTML, {
                     headers: { "Content-Type": "text/html", ...corsHeaders() },
                 });
             }
@@ -71,8 +78,10 @@ const server = Bun.serve({
             const m = p.match(/^\/api\/jobs\/([^/]+)\/(status|intervene|cancel)$/);
             if (m) {
                 const [, jobId, action] = m;
-                if (action === "status" && req.method === "GET")
+                if (action === "status" && req.method === "GET") {
+                    if (!publicAuthorized()) return unauthorized();
                     return await handleStatus(jobId!);
+                }
                 if (action === "intervene" && req.method === "POST") {
                     if (!publicAuthorized()) return unauthorized();
                     return await handleIntervene(jobId!, req);

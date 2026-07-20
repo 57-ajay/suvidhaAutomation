@@ -8,16 +8,20 @@ spec:
   template:
     metadata: { labels: { app: api } }
     spec:
-      terminationGracePeriodSeconds: 15  
+      terminationGracePeriodSeconds: 15
       containers:
         - name: api
-          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/api:v2
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/api:v3
           ports: [{ containerPort: 3000 }]
           envFrom: [{ secretRef: { name: suvidha-env } }]
           env:
             - { name: REDIS_URL, value: "redis://redis:6379" }
-            - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/secrets/service.json" }
-          volumeMounts: [{ name: firebase-sa, mountPath: /secrets, readOnly: true }]
+            - {
+                name: GOOGLE_APPLICATION_CREDENTIALS,
+                value: "/secrets/service.json",
+              }
+          volumeMounts:
+            [{ name: firebase-sa, mountPath: /secrets, readOnly: true }]
           readinessProbe:
             httpGet: { path: /api/health, port: 3000 }
             initialDelaySeconds: 3

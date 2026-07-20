@@ -50,6 +50,10 @@ export const config = {
         process.env.CHALLAN_DOC_PATH_TEMPLATE ?? "challans/{requestId}",
     challanGcsPrefix:
         process.env.CHALLAN_GCS_PREFIX ?? "driverUtilitiesRequests/challanSettlement",
+
+    dashboardUser: process.env.DASHBOARD_USER ?? "",
+    dashboardPass: process.env.DASHBOARD_PASS ?? "",
+    sessionSecret: process.env.SESSION_SECRET ?? "",
 } as const;
 
 
