@@ -1,3 +1,4 @@
+// api/src/dashboard.ts
 // Internal ops console at /api/dashboard. Two views:
 //   • Jobs   — live job list (polls /api/jobs), filter by task + status, 50 per
 //              page with prev/next, answer captchas/OTPs, view QR, open the live
@@ -173,6 +174,20 @@ export const DASHBOARD_HTML = `<!doctype html>
         <option value="parked">parked</option>
       </select>
     </label>
+    <label>Source
+      <select id="f-source">
+        <option value="">All</option>
+        <option value="app">app</option>
+        <option value="web">web</option>
+      </select>
+    </label>
+    <label>Path
+      <select id="f-path">
+        <option value="">All</option>
+        <option value="fullyAutomated">fullyAutomated</option>
+        <option value="scripted">scripted</option>
+      </select>
+    </label>
     <button class="ghost" id="btn-refresh">Refresh</button>
     <label><input type="checkbox" id="auto" checked> auto</label>
     <span class="count" id="count"></span>
@@ -229,6 +244,22 @@ export const DASHBOARD_HTML = `<!doctype html>
 
   <!-- BORDER TAX -->
   <form class="runform hidden" id="form-border">
+    <div class="formrow">
+      <div class="field">
+        <label>Source</label>
+        <select id="bt-source">
+          <option value="app">app (fullyAutomated)</option>
+          <option value="web">web</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Path (web only)</label>
+        <select id="bt-path" disabled>
+          <option value="fullyAutomated">fullyAutomated</option>
+          <option value="scripted">scripted</option>
+        </select>
+      </div>
+    </div>
     <div class="field">
       <label>requestId</label>
       <div class="with-btn">
@@ -297,7 +328,7 @@ var KEYKEY = 'agentConsoleApiKey';
 var apiKey = '';
 try { apiKey = localStorage.getItem(KEYKEY) || ''; } catch (e) {}
 
-var state = { offset:0, limit:50, taskId:'', status:'', total:0 };
+var state = { offset:0, limit:50, taskId:'', status:'', source:'', path:'', total:0 };
 var sent = new Set();
 var timer = null;
 
@@ -351,6 +382,8 @@ async function fetchJobs(){
   var qs = 'limit=' + state.limit + '&offset=' + state.offset;
   if (state.taskId) qs += '&taskId=' + encodeURIComponent(state.taskId);
   if (state.status) qs += '&status=' + encodeURIComponent(state.status);
+  if (state.source) qs += '&source=' + encodeURIComponent(state.source);
+  if (state.path)   qs += '&path='   + encodeURIComponent(state.path);
   var data;
   try { data = await (await fetch('/api/jobs?' + qs)).json(); }
   catch (e) { return; }
@@ -407,6 +440,7 @@ function render(j){
      + '<span class="tags">' + taskBadge(j.taskId)
      + '<span class="badge b-' + esc(j.status) + '">' + esc(j.status) + '</span></span></div>';
   h += '<div class="meta">' + esc(j.state || j.vehicleNumber || '') + ' · ' + esc(j.driverId || '')
+     + ' · ' + esc(j.source || 'app') + ' · ' + esc(j.path || 'fullyAutomated')
      + ' · ' + ago(j.createdAt) + '</div>';
   if (j.agentStatus)
     h += '<div class="agent">lifecycle <b>' + esc(j.agentStatus) + '</b>'
@@ -481,14 +515,16 @@ async function cancelJob(id){
 function cssEsc(s){ return (s || '').replace(/["\\\\]/g, '\\\\$&'); }
 
 // ---------- run forms ----------
-async function submitRun(taskId, params, btn){
+async function submitRun(taskId, params, btn, source, path){
   var box = document.getElementById('runresult');
   if (btn) btn.disabled = true;
   box.innerHTML = '<div class="resbox">Submitting…</div>';
   try {
+    var body = { taskId: taskId, source: source || 'app', params: params };
+    if (path) body.path = path;
     var res = await fetch('/api/run', {
       method:'POST', headers: authHeaders(true),
-      body: JSON.stringify({ taskId: taskId, source:'app', params: params }),
+      body: JSON.stringify(body),
     });
     var data = await res.json();
     if (res.ok && data.ok && data.jobId && data.status !== 'cancelled'){
@@ -567,11 +603,18 @@ async function loadMeta(){
     var s2 = document.getElementById('bt-state');
     (hres.states || []).forEach(function(st){
       var o = document.createElement('option');
-      o.value = st.code; o.textContent = st.code + ' — ' + st.name;
+      var tag = st.auto === false ? ' (scripted only)'
+              : (st.scriptedEnabled ? ' (auto + scripted)' : '');
+      o.value = st.code; o.textContent = st.code + ' — ' + st.name + tag;
       s2.appendChild(o);
     });
   } catch (e) {}
 }
+
+document.getElementById('bt-source').addEventListener('change', function(e){
+  var p = document.getElementById('bt-path');
+  p.disabled = e.target.value !== 'web';
+});
 
 // ---------- wiring ----------
 document.querySelectorAll('.tab').forEach(function(b){
@@ -586,6 +629,12 @@ document.getElementById('f-task').addEventListener('change', function(e){
 });
 document.getElementById('f-status').addEventListener('change', function(e){
   state.status = e.target.value; state.offset = 0; fetchJobs();
+});
+document.getElementById('f-source').addEventListener('change', function(e){
+  state.source = e.target.value; state.offset = 0; fetchJobs();
+});
+document.getElementById('f-path').addEventListener('change', function(e){
+  state.path = e.target.value; state.offset = 0; fetchJobs();
 });
 document.getElementById('btn-refresh').addEventListener('click', fetchJobs);
 document.getElementById('prev').addEventListener('click', function(){
@@ -645,7 +694,9 @@ document.getElementById('form-puc').addEventListener('submit', function(e){
 });
 document.getElementById('form-border').addEventListener('submit', function(e){
   e.preventDefault();
-  submitRun('border-tax', buildBorder(), e.submitter);
+  var src2 = val('bt-source') || 'app';
+  submitRun('border-tax', buildBorder(), e.submitter,
+    src2, src2 === 'web' ? (val('bt-path') || 'fullyAutomated') : undefined);
 });
 
 // auto refresh (jobs view only)

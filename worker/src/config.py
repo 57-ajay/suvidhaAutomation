@@ -1,3 +1,4 @@
+# worker/src/config.py
 """Worker configuration from environment. Every tunable lives here."""
 
 from __future__ import annotations
@@ -41,6 +42,13 @@ JOB_MAX_RUNTIME_SECS = int(os.environ.get("JOB_MAX_RUNTIME_SECS", "2400"))
 # User-solved captcha attempts before a hard cancel (no money has moved).
 MAX_USER_CAPTCHA_ATTEMPTS = int(os.environ.get("MAX_USER_CAPTCHA_ATTEMPTS", "3"))
 
+
+# Scripted (web) path: how long the human operator has to solve the captcha,
+# pick a payment method, and complete the payment after the form-fill hands
+# over. The receipt poll runs in the background for this whole window; no
+# receipt (and no failure marker) by the deadline ends the run as failed
+# (manualReview) — money may have moved, so never a silent cancel.
+WEB_HANDOVER_TIMEOUT_SECS = int(os.environ.get("WEB_HANDOVER_TIMEOUT_SECS", "420"))
 
 # Pending-transaction auto-clear (Vertex-OCR background captcha). OFF by
 # default: a pending transaction then cancels with a clear retry message.

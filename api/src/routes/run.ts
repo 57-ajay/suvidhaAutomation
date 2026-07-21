@@ -1,17 +1,33 @@
+// api/src/routes/run.ts
 // POST /api/run
-// Body: { taskId: "border-tax", source: "app", params: {...} }
+// Body: { taskId: "border-tax", source: "app" | "web", path?, params: {...} }
 //
-//   1. Per-state validation. Failure -> 400 with { missing, invalid, message }
-//      so the client can tell the driver exactly what to fix. Nothing enqueued.
-//   2. Eligibility pre-check. Ineligible -> request marked cancelled up front,
-//      200 with status "cancelled" + reason.
+//   1. Source/path routing (border-tax):
+//        source is REQUIRED ("app" | "web").
+//        app  -> path is always "fullyAutomated" (an explicit different path
+//                is rejected; there is no operator on the app flow).
+//        web  -> path is REQUIRED: "scripted" | "fullyAutomated".
+//        fullyAutomated -> state must be in AUTO_STATE_CODES (UP/HR/MP/PB/HP).
+//        scripted       -> state must be in the env allow-list
+//                          SCRIPTED_BORDER_TAX_STATES (config.scriptedStates);
+//                          empty allow-list = scripted disabled everywhere.
+//      PUC stays app-only; challan-settlement keeps its own handling.
+//   2. Per-state validation. Failure -> 400 with { missing, invalid, message }
+//      so the client can tell the caller exactly what to fix. Nothing enqueued.
+//      (The old eligibility pre-check is REMOVED — the client checks
+//      eligibility itself; any task that reaches us is a task to complete.)
 //   3. Dedupe on requestId: an already-active job is returned, not restarted.
-//   4. Enqueue + seed aiAgentData.status = queued.
+//   4. Enqueue (job hash carries `path`) + seed aiAgentData.status = queued
+//      with aiAgentData.path, so the client can filter on it.
 
 import { redis, keys, JOB_TTL } from "../redis";
 import { json, readJson } from "../lib/http";
-import { getStateValidator, supportedStates } from "../validators";
-import { checkEligibility } from "../internal/eligibility";
+import {
+    getStateValidator,
+    supportedStates,
+    isAutoCapable,
+    isScriptedEnabled,
+} from "../validators";
 import { setAgentStatus } from "../internal/requestDoc";
 import { handleChallanSettlementRun } from "./challanSettlementRun";
 import { STATUS } from "../lifecycle/statuses";
@@ -51,15 +67,25 @@ export async function handleRun(req: Request): Promise<Response> {
             400,
         );
     }
-    if (source !== "app") {
+    if (source !== "app" && source !== "web") {
         return json(
-            { ok: false, error: `unsupported source: ${source} (app only)` },
+            { ok: false, error: `unsupported source: ${source} (app | web)` },
             400,
         );
     }
 
-    // PUC certificate: no per-state validator, no eligibility, no money line.
+    // PUC certificate: app-only (no operator flow), no per-state validator,
+    // no money line.
     if (taskId === "puc-certificate") {
+        if (source !== "app") {
+            return json(
+                {
+                    ok: false,
+                    error: `unsupported source for puc-certificate: ${source} (app only)`,
+                },
+                400,
+            );
+        }
         return await handlePucRun(rawParams, source);
     }
 
@@ -79,6 +105,91 @@ export async function handleRun(req: Request): Promise<Response> {
         );
     }
 
+    // ── path resolution (see the header matrix) ─────────────────────────
+    const rawPath: string | undefined =
+        (body.path as string) ?? (rawParams.path as string | undefined);
+    let path: "fullyAutomated" | "scripted";
+    if (source === "app") {
+        if (rawPath && rawPath !== "fullyAutomated") {
+            return json(
+                {
+                    ok: false,
+                    error: "unsupported_path",
+                    message:
+                        `path "${rawPath}" is not available for source "app" — ` +
+                        "app runs are always fullyAutomated",
+                },
+                400,
+            );
+        }
+        path = "fullyAutomated";
+    } else {
+        if (!rawPath) {
+            return json(
+                {
+                    ok: false,
+                    error: "validation_failed",
+                    missing: ["path"],
+                    invalid: [],
+                    message:
+                        'path is required for source "web": "scripted" or ' +
+                        '"fullyAutomated"',
+                },
+                400,
+            );
+        }
+        if (rawPath !== "scripted" && rawPath !== "fullyAutomated") {
+            return json(
+                {
+                    ok: false,
+                    error: "unsupported_path",
+                    message:
+                        `unsupported path: ${rawPath} ` +
+                        '("scripted" | "fullyAutomated")',
+                },
+                400,
+            );
+        }
+        path = rawPath;
+    }
+
+    if (path === "fullyAutomated" && !isAutoCapable(validator.code)) {
+        return json(
+            {
+                ok: false,
+                error: "unsupported_path",
+                message:
+                    `state ${validator.code} is not fully automated — ` +
+                    'run it with path "scripted"',
+            },
+            400,
+        );
+    }
+    if (path === "scripted" && !isScriptedEnabled(validator.code)) {
+        return json(
+            {
+                ok: false,
+                error: "unsupported_path",
+                message:
+                    `the scripted path is not enabled for state ` +
+                    `${validator.code} — add it to SCRIPTED_BORDER_TAX_STATES ` +
+                    "on the API to roll it out",
+            },
+            400,
+        );
+    }
+
+    // The five fully-automated validators pin paymentMethod to UPI (their
+    // pipeline IS UPI). On the scripted path the operator picks the method at
+    // the portal, so the pin must not 400 a web request: satisfy it for
+    // validation, then put the caller's explicit value back afterwards. The
+    // scripted-only validators (UK/TN/BR) don't pin and keep their own
+    // defaults — no shim for them.
+    const callerPaymentMethod = rawParams.paymentMethod;
+    if (path === "scripted" && isAutoCapable(validator.code)) {
+        rawParams.paymentMethod = "UPI";
+    }
+
     const result = validator.validate(rawParams);
     if (!result.ok) {
         return json(
@@ -93,25 +204,13 @@ export async function handleRun(req: Request): Promise<Response> {
         );
     }
     const params = result.params;
-
-    const elig = await checkEligibility(params);
-    if (!elig.eligible) {
-        await setAgentStatus({
-            requestId: params.requestId,
-            driverId: params.driverId,
-            to: STATUS.CANCELLED,
-            source,
-            error: elig.reason ?? "vehicle not eligible",
-            force: true,
-        }).catch((e) =>
-            console.error(`[run] eligibility cancel write failed: ${e.message}`),
-        );
-        return json({
-            ok: true,
-            status: "cancelled",
-            reason: elig.reason,
-            requestId: params.requestId,
-        });
+    if (
+        path === "scripted" &&
+        isAutoCapable(validator.code) &&
+        typeof callerPaymentMethod === "string" &&
+        callerPaymentMethod.trim()
+    ) {
+        params.paymentMethod = callerPaymentMethod.trim().toUpperCase();
     }
 
     // jobId == requestId: the client talks to /api/jobs/:requestId/* directly.
@@ -132,6 +231,7 @@ export async function handleRun(req: Request): Promise<Response> {
             params: JSON.stringify(params),
             status: "queued",
             source,
+            path,
             requestId: params.requestId,
             driverId: params.driverId,
             vehicleNumber: params.vehicleNumber,
@@ -147,12 +247,15 @@ export async function handleRun(req: Request): Promise<Response> {
         driverId: params.driverId,
         to: STATUS.QUEUED,
         source,
+        // aiAgentData.path is written once here and persists across merges,
+        // so the client can filter fullyAutomated vs scripted requests.
+        extra: { path },
         force: true,
     }).catch((e) =>
         console.error(`[run] seed queued status failed: ${e.message}`),
     );
 
-    return json({ ok: true, jobId, status: "queued" });
+    return json({ ok: true, jobId, status: "queued", path });
 }
 
 // PUC has no state/eligibility concept, so it validates inline rather than
