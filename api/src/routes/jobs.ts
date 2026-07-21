@@ -1,3 +1,4 @@
+// api/src/routes/jobs.ts
 // GET  /api/jobs/:id/status     -> redis job hash (minus bulky fields)
 // POST /api/jobs/:id/intervene  -> push humanInput (captcha text, or "paid")
 // POST /api/jobs/:id/cancel     -> request cancellation; worker monitor reacts
@@ -45,6 +46,8 @@ export async function handleList(params: URLSearchParams): Promise<Response> {
     const offset = Math.max(0, parseInt(params.get("offset") ?? "0", 10) || 0);
     const taskId = (params.get("taskId") ?? "").trim(); // "" = all tasks
     const status = (params.get("status") ?? "").trim(); // "" = all statuses
+    const source = (params.get("source") ?? "").trim(); // "" = all sources
+    const path = (params.get("path") ?? "").trim(); // "" = all paths
 
     // Newest-first ids, bounded so a busy console can't fan out unbounded
     // HGETALLs. 1000 jobs is far more than the 24h TTL window ever holds.
@@ -63,6 +66,10 @@ export async function handleList(params: URLSearchParams): Promise<Response> {
         const job = await redis.hgetall(keys.job(id));
         if (!job || !job.id) continue; // expired/cleared
         if (taskId && (job.taskId ?? "border-tax") !== taskId) continue;
+        // Pre-scripted jobs have no `path` hash field; they were all app +
+        // fullyAutomated, so the defaults keep them filterable.
+        if (source && (job.source ?? "app") !== source) continue;
+        if (path && (job.path ?? "fullyAutomated") !== path) continue;
 
         const st = job.status ?? "";
         counts.total++;

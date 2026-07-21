@@ -10,3 +10,5 @@ service.json
 *.json
 service*
 *.json
+TASK.md
+MEMORY.md

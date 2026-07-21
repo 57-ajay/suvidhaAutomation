@@ -1,3 +1,4 @@
+# worker/src/lifecycle/status.py
 """Lifecycle status mirror of api/src/lifecycle/statuses.ts.
 
 Keep in lockstep with the TypeScript source of truth. The API re-validates
@@ -16,6 +17,10 @@ class Status:
     CAPTCHA_SOLVING = "captchaSolving"
     SETTING_UP_PAYMENT_REQUEST = "settingUpPaymentRequest"
     QR_PAYMENT_NEEDED = "qrPaymentNeeded"
+    # Scripted (web) path only: the form is filled and the browser is handed to
+    # a human operator on the live view — they solve the captcha, pick the
+    # payment method, and pay; the worker polls for the receipt in background.
+    HUMAN_HANDOVER = "humanHandover"
     VERIFYING_PAYMENT = "verifyingPayment"
     VERIFYING_PENDING_PAYMENT = "verifyingPendingPayment"
     GENERATING_RECEIPT = "generatingReceipt"
@@ -41,6 +46,7 @@ _ALLOWED: dict[str, set[str]] = {
         Status.PENDING_TRANSACTION,
         Status.CAPTCHA_SOLVING,
         Status.SETTING_UP_PAYMENT_REQUEST,
+        Status.HUMAN_HANDOVER,  # scripted path: form filled -> operator takes over
         Status.GENERATING_RECEIPT,
         Status.COMPLETED,
         Status.CANCELLED,
@@ -70,6 +76,15 @@ _ALLOWED: dict[str, set[str]] = {
         Status.VERIFYING_PAYMENT,
         Status.GENERATING_RECEIPT,
         Status.VERIFYING_PENDING_PAYMENT,
+        Status.FAILED,
+    },
+    # humanHandover is deliberately NOT in PRE_PAYMENT: the operator holds the
+    # payment page, so an unexpected stop must reconcile (failed), never a
+    # silent cancelled. Receipt detected -> generatingReceipt; portal reported
+    # failure / handover window expired -> failed.
+    Status.HUMAN_HANDOVER: {
+        Status.VERIFYING_PAYMENT,
+        Status.GENERATING_RECEIPT,
         Status.FAILED,
     },
     Status.VERIFYING_PAYMENT: {

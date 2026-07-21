@@ -10,14 +10,14 @@ spec:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
     spec:
-      serviceAccountName: worker-sa  
+      serviceAccountName: worker-sa
       nodeSelector: { role: worker }
       tolerations:
         - { key: dedicated, operator: Equal, value: worker, effect: NoSchedule }
       terminationGracePeriodSeconds: 3600
       containers:
         - name: worker
-          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/worker:v5
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/worker:v6
           ports: [{ containerPort: 6080 }]
           envFrom: [{ secretRef: { name: suvidha-env } }]
           env:
@@ -25,7 +25,10 @@ spec:
             - { name: API_URL, value: "http://api:3000" }
             - { name: MAX_SLOTS, value: "12" }
             - { name: DOMAIN, value: "gkep.cabswale.in" }
-            - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+            - {
+                name: POD_IP,
+                valueFrom: { fieldRef: { fieldPath: status.podIP } },
+              }
           volumeMounts: [{ name: dshm, mountPath: /dev/shm }]
           resources:
             requests: { cpu: "3", memory: 12Gi }

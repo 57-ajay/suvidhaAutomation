@@ -1,3 +1,4 @@
+// api/src/lifecycle/statuses.ts
 // The border-tax request lifecycle as a finite state machine.
 //
 // SINGLE SOURCE OF TRUTH for the agent lifecycle. The worker mirrors it in
@@ -28,6 +29,9 @@ export const STATUS = {
     CAPTCHA_SOLVING: "captchaSolving",
     SETTING_UP_PAYMENT_REQUEST: "settingUpPaymentRequest",
     QR_PAYMENT_NEEDED: "qrPaymentNeeded",
+    // Scripted (web) path only: form filled, browser handed to a human operator
+    // on the live view; the worker polls for the receipt in the background.
+    HUMAN_HANDOVER: "humanHandover",
     VERIFYING_PAYMENT: "verifyingPayment",
     VERIFYING_PENDING_PAYMENT: "verifyingPendingPayment",
     GENERATING_RECEIPT: "generatingReceipt",
@@ -55,6 +59,7 @@ const ALLOWED: Record<Status, Status[]> = {
         STATUS.PENDING_TRANSACTION,
         STATUS.SETTING_UP_PAYMENT_REQUEST, // AI solved the disclaimer captcha silently
         STATUS.CAPTCHA_SOLVING,
+        STATUS.HUMAN_HANDOVER, // scripted path: form filled -> operator takes over
         STATUS.GENERATING_RECEIPT, // PUC: no-payment flow goes straight to capture
         STATUS.COMPLETED,
         STATUS.CANCELLED,
@@ -81,6 +86,15 @@ const ALLOWED: Record<Status, Status[]> = {
     [STATUS.QR_PAYMENT_NEEDED]: [
         STATUS.VERIFYING_PAYMENT,
         STATUS.VERIFYING_PENDING_PAYMENT,
+        STATUS.GENERATING_RECEIPT,
+        STATUS.FAILED,
+    ],
+    // humanHandover (scripted path) sits PAST the money line: the operator holds
+    // the payment page, so an unexpected stop reconciles as failed, never a
+    // silent cancelled. Receipt markers seen -> generatingReceipt; portal
+    // reported failure / handover window expired -> failed.
+    [STATUS.HUMAN_HANDOVER]: [
+        STATUS.VERIFYING_PAYMENT,
         STATUS.GENERATING_RECEIPT,
         STATUS.FAILED,
     ],

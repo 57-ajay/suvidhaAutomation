@@ -1,3 +1,4 @@
+// api/src/config.ts
 // All API configuration, read once from the environment.
 
 function int(name: string, fallback: number): number {
@@ -50,6 +51,17 @@ export const config = {
         process.env.CHALLAN_DOC_PATH_TEMPLATE ?? "challans/{requestId}",
     challanGcsPrefix:
         process.env.CHALLAN_GCS_PREFIX ?? "driverUtilitiesRequests/challanSettlement",
+
+    // Scripted-path rollout switch: comma-separated state codes (e.g.
+    // "UP,HR,UK") that may run path=scripted. Empty = scripted disabled
+    // everywhere, so states go live one at a time exactly like the old
+    // process's SCRIPTED_BORDER_TAX_STATES rollout.
+    scriptedStates: new Set(
+        (process.env.SCRIPTED_BORDER_TAX_STATES ?? "")
+            .split(",")
+            .map((s) => s.trim().toUpperCase())
+            .filter(Boolean),
+    ),
 
     dashboardUser: process.env.DASHBOARD_USER ?? "",
     dashboardPass: process.env.DASHBOARD_PASS ?? "",
