@@ -79,7 +79,11 @@ post "web + scripted + non-allow-listed state -> 400 env hint" 400 \
 # ^ assumes BR is NOT allow-listed during burn-in; adjust if it is.
 post "puc + web -> 400 app only" 400 '.error | test("app only")' \
   '{"taskId":"puc-certificate","source":"web","params":{"requestId":"burnin-neg-puc","driverId":"'$DRIVER'","registrationNumber":"'$VEHICLE'","chassisNumber":"ABCDE12345"}}'
-post "TN + DAYS -> 400 validation" 400 '.error == "validation_failed"' \
+# TN's no-DAYS rule fires at the validator, which is only reachable when TN
+# is allow-listed; otherwise the allow-list gate rejects first. Both are
+# correct 400s and neither enqueues, so accept either.
+post "TN + DAYS -> 400 (validator or allow-list gate)" 400 \
+  '.error == "validation_failed" or .error == "unsupported_path"' \
   '{"taskId":"border-tax","source":"web","path":"scripted","params":{"requestId":"burnin-neg-tn","driverId":"'$DRIVER'","vehicleNumber":"TN01AB1234","state":"TN","taxMode":"DAYS","taxFrom":"'$TAXFROM'"}}'
 
 if [ "$ENQUEUE" = "1" ]; then
