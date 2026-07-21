@@ -461,7 +461,7 @@ function render(j){
     h += '</div>';
   }
 
-  if (waiting){
+  if (waiting && j.agentStatus !== 'humanHandover'){
     h += '<div class="controls">'
        + '<input type="text" data-action="send-input" data-id="' + esc(j.id) + '" placeholder="captcha text / OTP / paid">'
        + '<button class="btn" data-action="send" data-id="' + esc(j.id) + '">Send answer</button>'
