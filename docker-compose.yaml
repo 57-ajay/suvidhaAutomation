@@ -1,0 +1,66 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+services:
+  nredis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - nredis-data:/data
+    networks:
+      - internal
+
+  napi:
+    build: ./api
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    environment:
+      REDIS_URL: redis://nredis:6379
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/service.json
+    volumes:
+      - ${SERVICE_ACCOUNT_FILE:-./service.json}:/secrets/service.json:ro
+    depends_on:
+      - nredis
+    networks:
+      internal:
+      proxy:
+        aliases:
+          - napi
+    # ports: ["3000:3000"]
+
+  nworker:
+    build: ./worker
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    environment:
+      REDIS_URL: redis://nredis:6379
+      API_URL: http://napi:3000
+      # CAPTCHA_DEBUG_DIR: /tmp/captcha-debug
+    # volumes:
+      # - ./captcha-debug:/tmp/captcha-debug
+    shm_size: "2gb"
+    depends_on:
+      - nredis
+      - napi
+    networks:
+      internal:
+      proxy:
+        aliases:
+          - nworker
+    # ports: ["6080:6080"]
+
+networks:
+  internal:
+  proxy:
+    external: true
+    name: proxy-new
+
+volumes:
+  nredis-data:
