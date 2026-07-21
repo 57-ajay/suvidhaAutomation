@@ -73,10 +73,16 @@ post "web + path=banana -> 400" 400 '.error == "unsupported_path"' \
   '{"taskId":"border-tax","source":"web","path":"banana","params":{'"$UPP"'}}'
 post "web + fullyAutomated + UK -> 400" 400 '.message | test("not fully automated")' \
   '{"taskId":"border-tax","source":"web","path":"fullyAutomated","params":{"requestId":"burnin-neg-uk","driverId":"'$DRIVER'","vehicleNumber":"UK07AB1234","state":"UK","taxMode":"DAYS","taxFrom":"'$TAXFROM'"}}'
-post "web + scripted + non-allow-listed state -> 400 env hint" 400 \
-  '.message | test("SCRIPTED_BORDER_TAX_STATES")' \
-  '{"taskId":"border-tax","source":"web","path":"scripted","params":{"requestId":"burnin-neg-br","driverId":"'$DRIVER'","vehicleNumber":"BR01AB1234","state":"BR","taxMode":"DAYS","taxFrom":"'$TAXFROM'"}}'
-# ^ assumes BR is NOT allow-listed during burn-in; adjust if it is.
+# Gate-state case: pick any registered state NOT currently allow-listed; if
+# every state is scripted-enabled there is nothing to gate — skip cleanly.
+GATE_STATE=$(curl -s "$BASE/api/health" | jq -r '[.states[] | select(.scriptedEnabled == false)][0].code // empty')
+if [ -n "$GATE_STATE" ]; then
+  post "web + scripted + non-allow-listed state ($GATE_STATE) -> 400 env hint" 400 \
+    '.message | test("SCRIPTED_BORDER_TAX_STATES")' \
+    '{"taskId":"border-tax","source":"web","path":"scripted","params":{"requestId":"burnin-neg-gate","driverId":"'$DRIVER'","vehicleNumber":"'$GATE_STATE'01AB1234","state":"'$GATE_STATE'","taxMode":"DAYS","taxFrom":"'$TAXFROM'"}}'
+else
+  echo "  --  gate-state case skipped (every state is scripted-enabled)"
+fi
 post "puc + web -> 400 app only" 400 '.error | test("app only")' \
   '{"taskId":"puc-certificate","source":"web","params":{"requestId":"burnin-neg-puc","driverId":"'$DRIVER'","registrationNumber":"'$VEHICLE'","chassisNumber":"ABCDE12345"}}'
 # TN's no-DAYS rule fires at the validator, which is only reachable when TN
