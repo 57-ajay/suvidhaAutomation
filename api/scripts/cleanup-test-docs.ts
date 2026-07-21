@@ -1,12 +1,3 @@
-// api/scripts/cleanup-test-docs.ts — MEMORY §9-5 prod test-data cleanup.
-//
-// SELF-CONTAINED on purpose: initializes firebase-admin itself with the same
-// credential order as src/firebase.ts (FIREBASE_SERVICE_ACCOUNT inline ->
-// GOOGLE_APPLICATION_CREDENTIALS path -> ADC), so it runs unchanged inside
-// the api pod (bun + firebase-admin + creds already there) or on any machine
-// with the key file. Reads the same *_DOC_PATH_TEMPLATE envs the api uses,
-// so a non-default template is respected automatically.
-//
 // WHAT IT TOUCHES (border-tax + puc request collections only):
 //   scans ids with prefixes  test-  bt_  puc_   (test- = declared test docs;
 //   bt_/puc_ = the ops dashboard's Generate button — real client traffic can
@@ -33,19 +24,14 @@
 //   bun cleanup-test-docs.ts --repair 3JVgobriW5VbCmohc7ed --note "kill-drill QR cancel, no payment issue — reconciled by hand"
 //   bun cleanup-test-docs.ts --challans           # read-only listing for hand review
 
-import { initializeApp, cert, applicationDefault, type App } from "firebase-admin/app";
+import { initializeApp, cert, type App, ServiceAccount } from "firebase-admin/app";
 import { getFirestore, FieldPath, Timestamp } from "firebase-admin/firestore";
 import { readFileSync } from "node:fs";
+import serviceAccount from "../../service-account.json";
+const credential = cert(serviceAccount as ServiceAccount);
 
 // ── bootstrap (mirrors src/firebase.ts) ─────────────────────────────────
 function init(): App {
-    const inline = process.env.FIREBASE_SERVICE_ACCOUNT;
-    const keyPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    const credential = inline
-        ? cert(JSON.parse(inline))
-        : keyPath
-            ? cert(keyPath)
-            : applicationDefault();
     return initializeApp({ credential });
 }
 const db = getFirestore(init());
