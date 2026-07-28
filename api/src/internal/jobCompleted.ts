@@ -10,6 +10,8 @@
 import { applyTerminal, saveAgentCost, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 import { setChallanCheckingFlag } from "./challanSettlement";
+import { finishChallanPayment } from "./challanPayment";
+import { redis, keys } from "../redis";
 export interface JobCompletedInput {
     jobId: string;
     requestId: string;
@@ -29,6 +31,32 @@ export async function handleJobCompleted(input: JobCompletedInput) {
     const { jobId, requestId, driverId } = input;
     if (!requestId || !driverId || !jobId) {
         return { ok: false, error: "jobId, requestId, driverId required" };
+    }
+
+    // challan-payment terminates on the subChallan doc, not a request doc:
+    // applyTerminal/saveAgentCost would write aiAgentData + manualReview into
+    // the border-tax collection under a doc id that is really a challan
+    // number. The vehicle is read off the job hash, which the run route wrote.
+    if ((input.task ?? "") === "challan-payment") {
+        const job = await redis.hgetall(keys.job(jobId));
+        const vehicleNumber = job?.vehicleNumber ?? "";
+        const challanNo = job?.challanNo ?? requestId;
+        if (!vehicleNumber) {
+            console.error(
+                `[jobCompleted] challan-payment ${jobId}: no vehicleNumber on the ` +
+                "job hash (expired?) — cannot address the subChallan",
+            );
+            return { ok: false, error: "vehicleNumber unavailable for challan-payment" };
+        }
+        const res = await finishChallanPayment({
+            vehicleNumber,
+            challanNo,
+            outcome: input.status,
+            summary: input.summary,
+            error: input.error ?? null,
+            receiptUrl: input.receiptUrl ?? null,
+        });
+        return res.ok ? { ok: true, status: res.status } : res;
     }
 
     // Persist cost first so it survives even if the terminal write races.

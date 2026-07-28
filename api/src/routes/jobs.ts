@@ -6,6 +6,7 @@
 import { redis, keys, JOB_TTL } from "../redis";
 import { json, readJson } from "../lib/http";
 import { applyTerminal } from "../internal/requestDoc";
+import { finishChallanPayment } from "../internal/challanPayment";
 import { STATUS } from "../lifecycle/statuses";
 
 const TERMINAL = new Set(["done", "cancelled", "failed", "partial"]);
@@ -109,6 +110,22 @@ export async function handleCancel(jobId: string): Promise<Response> {
     // doc would sit at "queued" forever. Write it here. Queued is always
     // pre-payment -> a clean cancelled; terminalApplied guards a double-write
     // if a worker raced in before the lrem.
+    // challan-payment closes out on the subChallan doc instead (same reason as
+    // in jobCompleted: there is no request doc to apply a terminal to). A
+    // RUNNING job still writes its own terminal when it stops.
+    if (wasQueued && (job.taskId ?? "") === "challan-payment") {
+        await finishChallanPayment({
+            vehicleNumber: job.vehicleNumber ?? "",
+            challanNo: job.challanNo ?? job.requestId ?? "",
+            outcome: "cancelled",
+            error: "cancelled by user before the run started",
+        }).catch((e) =>
+            console.error(`[cancel] challan-payment close-out failed for ${jobId}: ${e.message}`),
+        );
+        await redis.hset(keys.job(jobId), "terminalApplied", "1");
+        return json({ ok: true, message: "cancellation requested" });
+    }
+
     if (wasQueued && job.requestId && job.driverId) {
         await applyTerminal({
             requestId: job.requestId,

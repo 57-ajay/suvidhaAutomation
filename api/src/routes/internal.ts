@@ -12,6 +12,10 @@ import { handleVehicleDetails } from "../internal/vehicleDetails";
 import { setAgentStatus } from "../internal/requestDoc";
 import { isStatus, type Status } from "../lifecycle/statuses";
 import { setChallanCheckingFlag, handleSaveChallanQuotations } from "../internal/challanSettlement";
+import {
+    handleSaveChallanPaymentReceipt,
+    reportChallanPaymentStatus,
+} from "../internal/challanPayment";
 
 export async function handleInternal(
     pathname: string,
@@ -28,6 +32,21 @@ export async function handleInternal(
         const b = await readJson(req);
         if (!isStatus(b.status)) {
             return json({ ok: false, error: `unknown status: ${b.status}` }, 400);
+        }
+        // challan-payment has no request document: its lifecycle lives on the
+        // subChallan under aiAgentPaymentStatus, addressed by the
+        // vehicleNumber + challanNo the reporter carries in `extra`. Routing it
+        // through setAgentStatus would write aiAgentData into the BORDER-TAX
+        // collection for a doc id that is really a challan number.
+        if (b.task === "challan-payment") {
+            return json(
+                await reportChallanPaymentStatus({
+                    requestId: b.requestId,
+                    status: b.status,
+                    error: b.error ?? undefined,
+                    extra: b.extra ?? undefined,
+                }),
+            );
         }
         try {
             const written = await setAgentStatus({
@@ -65,6 +84,9 @@ export async function handleInternal(
     }
     if (pathname === "/api/internal/challan-settlement/flag") {
         return json(await setChallanCheckingFlag(await readJson(req) as any));
+    }
+    if (pathname === "/api/internal/challan-payment/save-receipt") {
+        return json(await handleSaveChallanPaymentReceipt(await readJson(req) as any));
     }
     if (pathname === "/api/internal/challan-settlement/quotations") {
         return json(await handleSaveChallanQuotations(await readJson(req) as any));

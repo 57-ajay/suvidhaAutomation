@@ -30,6 +30,7 @@ import {
 } from "../validators";
 import { setAgentStatus } from "../internal/requestDoc";
 import { handleChallanSettlementRun } from "./challanSettlementRun";
+import { handleChallanPaymentRun } from "./challanPaymentRun";
 import { STATUS } from "../lifecycle/statuses";
 
 const ACTIVE = new Set(["queued", "running", "waiting_for_human"]);
@@ -41,7 +42,12 @@ export async function handleRun(req: Request): Promise<Response> {
     // Mandatory per product spec; accepted top-level or inside params.
     const source: string | undefined = body.source ?? (rawParams.source as string);
 
-    if (taskId !== "border-tax" && taskId !== "puc-certificate" && taskId !== "challan-settlement") {
+    if (
+        taskId !== "border-tax" &&
+        taskId !== "puc-certificate" &&
+        taskId !== "challan-settlement" &&
+        taskId !== "challan-payment"
+    ) {
         return json({ ok: false, error: `unsupported taskId: ${taskId}` }, 400);
     }
 
@@ -53,6 +59,19 @@ export async function handleRun(req: Request): Promise<Response> {
             );
         }
         return await handleChallanSettlementRun(rawParams, source);
+    }
+
+    // Challan payment: scripted-only (there is no fully-automated path — the
+    // OTP goes to the driver's phone), so it takes no `path`, exactly like
+    // challan-settlement and PUC. One challan per request.
+    if (taskId === "challan-payment") {
+        if (source !== "app" && source !== "web") {
+            return json(
+                { ok: false, error: `unsupported source: ${source}` },
+                400,
+            );
+        }
+        return await handleChallanPaymentRun(rawParams, source);
     }
 
     if (!source) {
