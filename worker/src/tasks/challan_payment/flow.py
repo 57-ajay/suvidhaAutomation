@@ -540,6 +540,27 @@ async def human_handover(ctx: RunContext) -> RunOutcome:
 
     while time.monotonic() < deadline:
         poll += 1
+        # Exit cleanly on cancel. Without this the loop runs to its deadline,
+        # main.py eventually SIGKILLs the process group, and the run terminates
+        # through finalize_orphan instead of run_job's job_completed — a path
+        # that used to lose the task id and strand the doc mid-flight.
+        # Terminal is `failed`, not `cancelled`: the operator was holding a live
+        # payment page, so this has to be reconciled, never silently dropped.
+        if ctx.r.hget(job_key(ctx.job_id), "status") == "cancelled":
+            ctx.reporter.clear_wait()
+            _log(ctx, "handover.cancelled_by_user", StepStatus.FAILED)
+            return RunOutcome(
+                status="failed",
+                summary=(
+                    f"challan {p.challanNo} ({department}): cancelled while the "
+                    "payment window was open — verify with the bank before "
+                    "retrying"
+                ),
+                error="cancelled during payment window",
+                abort_reason="cancelled_during_payment",
+                payment_likely=True,
+                run_log=ctx.log.dump(),
+            )
         try:
             res = await cdp_eval(ctx.session, S.RECEIPT_READY_JS)
             if res and res.get("found"):

@@ -97,6 +97,13 @@ const ALLOWED: Record<PaymentStatus, PaymentStatus[]> = {
 export function canTransition(from: PaymentStatus, to: PaymentStatus): boolean {
     if (TERMINAL.has(from)) return false;
     if (from === to) return true;
+    // ANY non-terminal state may go to ANY terminal state. The FSM exists to
+    // stop a reaped worker resurrecting a finished challan and to catch
+    // nonsense forward moves — not to veto an ending. Refusing a terminal is
+    // the one failure mode that strands a challan mid-flight (a cancel during
+    // handover left a doc reading "waitingForHuman" forever), so endings are
+    // always accepted and the reason field carries the detail.
+    if (TERMINAL.has(to)) return true;
     return (ALLOWED[from] ?? []).includes(to);
 }
 

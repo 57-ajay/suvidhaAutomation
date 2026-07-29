@@ -40,7 +40,6 @@ async function sweep(): Promise<void> {
             const [status, agentStatus, lease, applied] = await redis.hmget(
                 keys.job(id), "status", "agentStatus", "leaseUntil", "terminalApplied",
             );
-            console.log({ "[agentStatus]": agentStatus });
             if (!status || applied === "1" || !SWEEPABLE.has(status)) continue;
             const leaseAt = lease ? parseInt(lease, 10) : NaN;
             if (!Number.isFinite(leaseAt) || leaseAt >= now) continue;

@@ -109,6 +109,13 @@ def finalize_orphan(job_id: str, r) -> None:
 
     request_id = job.get("requestId", job_id)
     driver_id = job.get("driverId", "")
+    # MUST forward the task. Without it job_completed() defaults to
+    # "border-tax", so the API applies the terminal through the BORDER-TAX
+    # request-doc template — writing aiAgentData into
+    # borderTaxRequests/{requestId} for a doc id that is really a challan
+    # number or a PUC request, and never touching the task's own document.
+    # api/src/sweeper.ts already does this correctly; this path was missed.
+    task_id = job.get("taskId") or "border-tax"
     try:
         resp = asyncio.run(
             api_client.job_completed(
@@ -120,6 +127,7 @@ def finalize_orphan(job_id: str, r) -> None:
                 summary=summary,
                 error=summary,
                 payment_likely=payment_likely,
+                task=task_id,
             )
         )
         if resp.get("ok"):
