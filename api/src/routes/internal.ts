@@ -33,18 +33,17 @@ export async function handleInternal(
         if (!isStatus(b.status)) {
             return json({ ok: false, error: `unknown status: ${b.status}` }, 400);
         }
-        // challan-payment has no request document: its lifecycle lives on the
-        // subChallan under aiAgentPaymentStatus, addressed by the
-        // vehicleNumber + challanNo the reporter carries in `extra`. Routing it
-        // through setAgentStatus would write aiAgentData into the BORDER-TAX
-        // collection for a doc id that is really a challan number.
+        // challan-payment has no request document: its lifecycle lives on
+        // subChallanRequests/{challanNo} under aiAgentStatus, and requestId IS
+        // the challan number. Routing it through setAgentStatus would write
+        // aiAgentData into the BORDER-TAX collection for a doc id that is
+        // really a challan number.
         if (b.task === "challan-payment") {
             return json(
                 await reportChallanPaymentStatus({
                     requestId: b.requestId,
                     status: b.status,
                     error: b.error ?? undefined,
-                    extra: b.extra ?? undefined,
                 }),
             );
         }

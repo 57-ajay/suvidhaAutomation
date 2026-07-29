@@ -115,20 +115,15 @@ async def amain(job_id: str, display: str) -> None:
             # page, then the operator does Get OTP -> OTP -> payment on the
             # live view while we watch for the receipt.
             #
-            # The Firestore target is challans/{vehicleNumber}/subChallans/
-            # {challanNo}. No requestDocPath template can address a
-            # subcollection, so the reporter carries BOTH ids on every status
-            # write and the API resolves the doc from them.
+            # The Firestore target is subChallanRequests/{challanNo}, and
+            # requestId IS the challan number, so the status-update payload
+            # already addresses the doc — nothing extra to carry.
             from tasks.challan_payment.params import ChallanPaymentParams
             from tasks.challan_payment.flow import PHASES as challan_payment_phases
 
             params = ChallanPaymentParams.from_job(params_raw)
             phases = challan_payment_phases
             ctx_task = "challan-payment"
-            reporter.extra = {
-                "vehicleNumber": params.vehicleNumber,
-                "challanNo": params.challanNo,
-            }
             await reporter.set_status(Status.AI_AGENT_STARTED)
 
         elif task == "verifyPendingPayment":

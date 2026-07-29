@@ -10,8 +10,10 @@ task ever fans out, so a failure on one challan can never affect another.
 
     requestId == challanNo, because that is the doc id of the record we write:
 
-        challans/{vehicleNumber}/subChallans/{challanNo}
-            aiAgentPaymentStatus: { ... }      <- the ONLY field we own
+        subChallanRequests/{challanNo}
+            aiAgentStatus: { status, paid, error, reason, attempt, ... }
+            receipt:   { url, at }      <- root, only once paid
+            subStatus: "completed"      <- root, only once paid
 
 Phases
     open_portal     index.php -> Select Department -> Proceed Now. The

@@ -12,7 +12,7 @@ Fault model, phase by phase:
         phase NEVER ends silently: either the receipt page appears (-> done),
         the portal declares the transaction failed/pending (-> failed), or the
         window expires (-> failed). `failed` flips manualReview on the API side
-        and leaves aiAgentPaymentStatus.status = "failed" with the reason.
+        and leaves aiAgentStatus.status = "failed" with the reason.
 
 Captcha: the same securimage widget challan-settlement already solves, so the
 same shared solver (tasks.border_tax.captcha_user.solve_captcha) in AI mode.

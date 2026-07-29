@@ -292,10 +292,11 @@ async def save_challan_receipt(
 ) -> dict:
     """Upload the receipt PDF and mark the challan paid.
 
-    The API writes challans/{vehicle_number}/subChallans/{challan_no} —
-    aiAgentPaymentStatus.{status:"completed", paid:true, receipt:{url, at}} —
-    in ONE merge, so "money moved" and "here is the proof" can never land
-    separately. Returns {ok, url} or {ok:false, error}.
+    The API writes subChallanRequests/{challan_no} — aiAgentStatus.{status:
+    "completed", paid:true} plus root receipt{url, at} and subStatus:
+    "completed" — in ONE merge, so "money moved" and "here is the proof" can
+    never land separately. vehicle_number only shapes the GCS path.
+    Returns {ok, url} or {ok:false, error}.
     """
     return await _post(
         "/api/internal/challan-payment/save-receipt",

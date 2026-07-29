@@ -1,38 +1,41 @@
-// Challan-payment Firestore writes. ONE CHALLAN PER JOB, and this module owns
-// exactly ONE field on exactly one doc:
+// Challan-payment Firestore writes. ONE CHALLAN PER JOB, one top-level doc:
 //
-//   challans/{VEH}/subChallans/{CHALLAN}
-//       aiAgentPaymentStatus: {
-//           status:     "queued" | "running" | "waitingForHuman"
-//                     | "generatingReceipt" | "completed" | "failed" | "cancelled",
-//           paid:       boolean,                       // true once a receipt is stored
-//           receiptUrl: string | null,                 // the deliverable
-//           error:      { isError: boolean, reason: string },
-//           attempt:    number,                        // +1 per /api/run
-//           createdAt:  Timestamp,                     // first request, written once
-//           updatedAt:  Timestamp,
+//   subChallanRequests/{CHALLAN}
+//       aiAgentStatus: {
+//           status:    "queued" | "running" | "waitingForHuman"
+//                    | "generatingReceipt" | "completed" | "failed" | "cancelled",
+//           paid:      boolean,      // true once a receipt is stored
+//           error:     boolean,      // true iff reason is non-empty
+//           reason:    string,       // "" unless error
+//           attempt:   number,       // +1 per /api/run for this challan
+//           createdAt: Timestamp,    // first request, written once
+//           updatedAt: Timestamp,
 //       }
+//       receipt:   { url: string, at: Timestamp }   // root, only once paid
+//       subStatus: "completed"                      // root, only once paid
 //
-// Deliberately free of identity fields: the doc PATH already carries them
-// (ref.id is the challan number, ref.parent.parent.id is the vehicle), so
-// duplicating them inside the object would only create a second source of
-// truth that can drift. A collectionGroup("subChallans") query still gives an
-// ops view of every challan on every vehicle without a join.
+// The doc id IS the challan number, so nothing here needs a vehicle number to
+// address a write — that is why the reporter no longer carries one. The
+// vehicle is still passed to the receipt upload, but only to shape the GCS
+// path.
 //
-// Nothing else on the doc is touched: `quotation` / `challanAmount` belong to
-// challan-settlement, and the rest belongs to the client. There is deliberately
-// NO aiAgentData — that shape is the border-tax request-doc lifecycle and does
-// not fit a per-challan subdocument.
+// receipt + subStatus + aiAgentStatus.paid + status:"completed" are written in
+// ONE merge, so a client can never observe a completed challan with no receipt,
+// or a receipt with no completion.
+//
+// On anything short of success, `subStatus` and `receipt` are left untouched —
+// a failed run must not stamp a root field the client reads as "done", and must
+// not erase proof of a payment that did go through.
 //
 // Concurrency: five challans on one vehicle = five jobs writing five DIFFERENT
-// subChallan docs, so they never contend. The real hazard is a late write from
-// a worker that has already been reaped, which is why every write runs in a
-// transaction behind the FSM below.
+// docs, so they never contend. The real hazard is a late write from a worker
+// that has already been reaped, which is why every write runs in a transaction
+// behind the FSM below.
 
 import { FieldValue, Timestamp, db, bucket } from "../firebase";
 
-const CHALLANS_COLLECTION = process.env.CHALLANS_COLLECTION ?? "challans";
-const SUBCHALLANS_COLLECTION = process.env.SUBCHALLANS_COLLECTION ?? "subChallans";
+const SUBCHALLAN_REQUESTS_COLLECTION =
+    process.env.SUBCHALLAN_REQUESTS_COLLECTION ?? "subChallanRequests";
 const RECEIPT_PREFIX =
     process.env.CHALLAN_PAYMENT_RECEIPT_PREFIX ??
     "driverUtilitiesRequests/challanPayments";
@@ -40,14 +43,12 @@ const RECEIPT_PREFIX =
 const normalizeId = (s: unknown): string =>
     String(s ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 
-/** challans/{VEH}/subChallans/{CHALLAN}. The challan id is used VERBATIM — it
- *  is the id the client wrote, and normalizing it here would create a second,
- *  orphaned doc. Only the vehicle (the parent key) is normalized. */
-export function subChallanDoc(vehicleNumber: string, challanNo: string) {
+/** subChallanRequests/{CHALLAN}. The challan id is used VERBATIM — it is the id
+ *  the client wrote, and normalizing it here would create a second, orphaned
+ *  doc. */
+export function subChallanRequestDoc(challanNo: string) {
     return db
-        .collection(CHALLANS_COLLECTION)
-        .doc(normalizeId(vehicleNumber))
-        .collection(SUBCHALLANS_COLLECTION)
+        .collection(SUBCHALLAN_REQUESTS_COLLECTION)
         .doc(String(challanNo).trim());
 }
 
@@ -55,10 +56,6 @@ export function subChallanDoc(vehicleNumber: string, challanNo: string) {
 // Same contract as lifecycle/statuses.ts, in the vocabulary a challan row
 // actually needs: is anyone waiting on me, and did it work. The worker speaks
 // the shared border-tax lifecycle; that is mapped in, never leaked out.
-//
-// Money line: `queued` and `running` are pre-payment, so a stop there is
-// `cancelled` (retryable). From `waitingForHuman` on, the operator is holding a
-// live payment page — a stop is `failed`, never a silent cancel.
 
 export type PaymentStatus =
     | "queued"
@@ -76,33 +73,22 @@ const TERMINAL: ReadonlySet<PaymentStatus> = new Set<PaymentStatus>([
 ]);
 
 const ALLOWED: Record<PaymentStatus, PaymentStatus[]> = {
-    queued: ["running", "cancelled", "failed"],
-    running: [
-        "waitingForHuman",
-        "generatingReceipt", // fast path: receipt already up when we look
-        "completed",
-        "cancelled",
-        "failed",
-    ],
-    waitingForHuman: ["generatingReceipt", "completed", "failed"],
-    generatingReceipt: ["completed", "failed"],
+    queued: ["running"],
+    running: ["waitingForHuman", "generatingReceipt"],
+    waitingForHuman: ["generatingReceipt"],
+    generatingReceipt: [],
     completed: [],
     failed: [],
     cancelled: [],
 };
 
-/** Self-transitions are idempotent re-emits and always legal. Anything out of
- *  a terminal is rejected — that is what stops a reaped worker resurrecting a
- *  finished challan. */
+/** Self-transitions are idempotent re-emits and always legal. Any non-terminal
+ *  may reach any terminal: the FSM exists to stop a reaped worker resurrecting
+ *  a finished challan and to catch nonsense forward moves — never to veto an
+ *  ending, which is the one failure mode that strands a challan mid-flight. */
 export function canTransition(from: PaymentStatus, to: PaymentStatus): boolean {
     if (TERMINAL.has(from)) return false;
     if (from === to) return true;
-    // ANY non-terminal state may go to ANY terminal state. The FSM exists to
-    // stop a reaped worker resurrecting a finished challan and to catch
-    // nonsense forward moves — not to veto an ending. Refusing a terminal is
-    // the one failure mode that strands a challan mid-flight (a cancel during
-    // handover left a doc reading "waitingForHuman" forever), so endings are
-    // always accepted and the reason field carries the detail.
     if (TERMINAL.has(to)) return true;
     return (ALLOWED[from] ?? []).includes(to);
 }
@@ -127,11 +113,11 @@ export function toPaymentStatus(lifecycle: string): PaymentStatus {
 // ── the single writer ────────────────────────────────────────────────────
 
 export interface WriteStatusInput {
-    vehicleNumber: string; // addresses the doc; NOT written into it
     challanNo: string; // addresses the doc; NOT written into it
     status: PaymentStatus;
-    reason?: string; // non-empty => error.isError = true
+    reason?: string; // non-empty => aiAgentStatus.error = true
     paid?: boolean;
+    /** Set only by the receipt upload. Writes root receipt + subStatus too. */
     receiptUrl?: string;
     /** Skip the FSM guard. Two callers only: the enqueue path re-opening a
      *  challan that ended failed/cancelled (a retry), and the receipt upload,
@@ -142,74 +128,71 @@ export interface WriteStatusInput {
 export async function writeChallanPaymentStatus(
     input: WriteStatusInput,
 ): Promise<{ ok: boolean; status?: PaymentStatus; error?: string }> {
-    const veh = normalizeId(input.vehicleNumber);
     const challan = String(input.challanNo ?? "").trim();
-    if (!veh || !challan) {
-        return { ok: false, error: "vehicleNumber and challanNo required" };
-    }
+    if (!challan) return { ok: false, error: "challanNo required" };
 
-    const ref = subChallanDoc(veh, challan);
+    const ref = subChallanRequestDoc(challan);
     const now = Timestamp.now();
     const to = input.status;
 
     try {
         const written = await db.runTransaction(async (tx) => {
             const snap = await tx.get(ref);
-            const cur = (snap.get("aiAgentPaymentStatus.status") ??
-                "queued") as PaymentStatus;
-            const first = !snap.get("aiAgentPaymentStatus.createdAt");
+            const cur = (snap.get("aiAgentStatus.status") ?? "queued") as PaymentStatus;
+            const first = !snap.get("aiAgentStatus.createdAt");
 
-            if (!input.force && !canTransition(cur, to)) {
-                return null;
-            }
+            if (!input.force && !canTransition(cur, to)) return null;
 
             const reason = input.reason ?? "";
-            const patch: Record<string, unknown> = {
+            const agent: Record<string, unknown> = {
                 status: to,
-                error: { isError: !!reason, reason },
+                error: !!reason,
+                reason,
                 updatedAt: now,
             };
-
-            if (input.paid !== undefined) patch.paid = input.paid;
-            if (input.receiptUrl) {
-                patch.receiptUrl = input.receiptUrl;
-                patch.paid = true;
-            }
+            if (input.paid !== undefined) agent.paid = input.paid;
             if (to === "queued") {
-                // A fresh attempt: clear the previous run's outcome so a retry
-                // never shows a stale receipt next to a live "queued".
-                patch.paid = false;
-                patch.receiptUrl = null;
-                patch.attempt = FieldValue.increment(1);
+                agent.paid = false;
+                agent.attempt = FieldValue.increment(1);
             }
             if (TERMINAL.has(to) && to !== "completed" && input.paid === undefined) {
-                patch.paid = false;
+                agent.paid = false;
             }
             if (first) {
-                patch.createdAt = now;
-                if (patch.attempt === undefined) patch.attempt = 1;
+                agent.createdAt = now;
+                if (agent.attempt === undefined) agent.attempt = 1;
             }
 
-            tx.set(ref, { aiAgentPaymentStatus: patch }, { merge: true });
+            const docPatch: Record<string, unknown> = { aiAgentStatus: agent };
+
+            // Root fields are written ONLY on a real receipt. A failed or
+            // cancelled run leaves subStatus and receipt exactly as they were:
+            // never stamp "completed" without proof, never erase proof that a
+            // payment went through.
+            if (input.receiptUrl) {
+                agent.paid = true;
+                docPatch.receipt = { url: input.receiptUrl, at: now };
+                docPatch.subStatus = "completed";
+            }
+
+            tx.set(ref, docPatch, { merge: true });
             return to;
         });
 
         if (written === null) {
             console.log(
-                `[challan-payment] ${veh}/${challan}: refused "${to}" ` +
+                `[challan-payment] ${challan}: refused "${to}" ` +
                 "(illegal transition or already terminal)",
             );
             return { ok: true, status: undefined };
         }
         console.log(
-            `[challan-payment] ${veh}/${challan} -> ${written}` +
+            `[challan-payment] ${challan} -> ${written}` +
             (input.reason ? ` (${input.reason})` : ""),
         );
         return { ok: true, status: written };
     } catch (e: any) {
-        console.error(
-            `[challan-payment] status write failed for ${veh}/${challan}: ${e.message}`,
-        );
+        console.error(`[challan-payment] status write failed for ${challan}: ${e.message}`);
         return { ok: false, error: e.message };
     }
 }
@@ -220,22 +203,19 @@ export async function writeChallanPaymentStatus(
  * never drive a second payment for money that already left. Read-only.
  */
 export async function isChallanAlreadyPaid(
-    vehicleNumber: string,
     challanNo: string,
 ): Promise<{ paid: boolean; receiptUrl?: string }> {
     try {
-        const snap = await subChallanDoc(vehicleNumber, challanNo).get();
-        const st = snap.get("aiAgentPaymentStatus");
-        if (st?.paid === true || st?.receiptUrl) {
-            return { paid: true, receiptUrl: st?.receiptUrl ?? undefined };
+        const snap = await subChallanRequestDoc(challanNo).get();
+        const receiptUrl = snap.get("receipt.url");
+        if (receiptUrl || snap.get("aiAgentStatus.paid") === true) {
+            return { paid: true, receiptUrl: receiptUrl ?? undefined };
         }
         return { paid: false };
     } catch (e: any) {
         // Fail OPEN on a read error: blocking every payment because Firestore
         // hiccuped is worse than the (already transactional) duplicate risk.
-        console.error(
-            `[challan-payment] paid-check failed for ${vehicleNumber}/${challanNo}: ${e.message}`,
-        );
+        console.error(`[challan-payment] paid-check failed for ${challanNo}: ${e.message}`);
         return { paid: false };
     }
 }
@@ -243,26 +223,19 @@ export async function isChallanAlreadyPaid(
 // ── worker-facing: /api/internal/status-update with task=challan-payment ──
 
 export interface ReportStatusInput {
-    requestId?: string;
+    requestId?: string; // == the challan number == the doc id
     status: string; // raw lifecycle status
     error?: string | null;
-    extra?: Record<string, unknown>; // carries vehicleNumber + challanNo
 }
 
 export async function reportChallanPaymentStatus(input: ReportStatusInput) {
-    const extra = input.extra ?? {};
-    const vehicleNumber = String(extra.vehicleNumber ?? "");
-    const challanNo = String(extra.challanNo ?? input.requestId ?? "");
-    if (!vehicleNumber || !challanNo) {
-        // Never 500 the worker's status path over a missing label.
-        console.error(
-            "[challan-payment] status-update without vehicleNumber/challanNo " +
-            `(requestId=${input.requestId})`,
-        );
-        return { ok: false, error: "vehicleNumber and challanNo required in extra" };
+    const challanNo = String(input.requestId ?? "").trim();
+    if (!challanNo) {
+        // Never 500 the worker's status path over a missing id.
+        console.error("[challan-payment] status-update with no requestId");
+        return { ok: false, error: "requestId (challanNo) required" };
     }
     return await writeChallanPaymentStatus({
-        vehicleNumber,
         challanNo,
         status: toPaymentStatus(input.status),
         reason: input.error ?? "",
@@ -274,8 +247,9 @@ export async function reportChallanPaymentStatus(input: ReportStatusInput) {
 export interface SaveReceiptInput {
     jobId?: string;
     requestId?: string;
-    vehicleNumber?: string;
+    vehicleNumber?: string; // GCS path only — not needed to address the doc
     challanNo?: string;
+    department?: string;
     pdfBase64?: string;
 }
 
@@ -290,11 +264,8 @@ export interface SaveReceiptInput {
  * keeps.
  */
 export async function handleSaveChallanPaymentReceipt(input: SaveReceiptInput) {
-    const veh = normalizeId(input.vehicleNumber);
     const challan = String(input.challanNo ?? input.requestId ?? "").trim();
-    if (!veh || !challan) {
-        return { ok: false, error: "vehicleNumber and challanNo required" };
-    }
+    if (!challan) return { ok: false, error: "challanNo required" };
     if (!input.pdfBase64) return { ok: false, error: "pdfBase64 required" };
 
     const buffer = Buffer.from(input.pdfBase64, "base64");
@@ -304,6 +275,7 @@ export async function handleSaveChallanPaymentReceipt(input: SaveReceiptInput) {
         return { ok: false, error: `receipt PDF too small (${buffer.length} bytes)` };
     }
 
+    const veh = normalizeId(input.vehicleNumber) || "unknown";
     let url: string;
     try {
         const safe = challan.replace(/[^A-Za-z0-9._-]/g, "_");
@@ -314,9 +286,9 @@ export async function handleSaveChallanPaymentReceipt(input: SaveReceiptInput) {
             metadata: {
                 contentType: "application/pdf",
                 metadata: {
-                    firebaseStorageDownloadTokens: downloadToken,
-                    vehicleNumber: veh,
                     challanNo: challan,
+                    vehicleNumber: veh,
+                    ...(input.department ? { department: input.department } : {}),
                     ...(input.jobId ? { jobId: input.jobId } : {}),
                 },
             },
@@ -332,14 +304,11 @@ export async function handleSaveChallanPaymentReceipt(input: SaveReceiptInput) {
         return { ok: false, error: `receipt upload failed: ${e.message}` };
     }
 
-    // receiptUrl + paid + completed land in ONE merge, so a client can never
-    // observe "completed with no receipt" or "receipt with no completion".
     const wrote = await writeChallanPaymentStatus({
-        vehicleNumber: veh,
         challanNo: challan,
         status: "completed",
         paid: true,
-        receiptUrl: url,
+        receiptUrl: url, // also writes root receipt{} + subStatus
         force: true, // proof money moved — always the last word
     });
     if (!wrote.ok) {
@@ -361,27 +330,24 @@ const TERMINAL_FROM_OUTCOME: Record<string, PaymentStatus> = {
 };
 
 export interface FinishInput {
-    vehicleNumber: string;
     challanNo: string;
     outcome: string; // done | cancelled | failed | partial
     summary?: string;
     error?: string | null;
-    receiptUrl?: string | null;
 }
 
 export async function finishChallanPayment(input: FinishInput) {
     const status = TERMINAL_FROM_OUTCOME[input.outcome] ?? "failed";
     // `completed` is really written by the receipt upload, which is the only
-    // thing that can prove payment. A "done" arriving here re-asserts it.
+    // thing that can prove payment. A "done" arriving here re-asserts it, but
+    // deliberately does NOT touch root receipt/subStatus.
     return await writeChallanPaymentStatus({
-        vehicleNumber: input.vehicleNumber,
         challanNo: input.challanNo,
         status,
         reason:
             status === "completed"
                 ? ""
                 : input.error || input.summary || `run ended ${input.outcome}`,
-        ...(input.receiptUrl ? { receiptUrl: input.receiptUrl } : {}),
         force: status === "completed",
     });
 }

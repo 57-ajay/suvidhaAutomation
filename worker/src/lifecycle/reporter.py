@@ -31,7 +31,6 @@ class StatusReporter:
         source: str,
         r: redis.Redis,
         task: str = "border-tax",
-        extra: dict | None = None,
     ):
         self.job_id = job_id
         self.request_id = request_id
@@ -39,11 +38,6 @@ class StatusReporter:
         self.source = source
         self.r = r
         self.task = task
-        # Merged into the `extra` of EVERY status_update. Tasks whose Firestore
-        # target needs more than requestId to address set it at dispatch —
-        # challan-payment writes into challans/{vehicleNumber}/subChallans/
-        # {challanNo}, which no requestDocPath template can express.
-        self.extra = extra or {}
         self._current = Status.QUEUED
 
     @property
@@ -86,7 +80,7 @@ class StatusReporter:
                 status=to,
                 source=self.source,
                 error=error,
-                extra={**self.extra, **(extra or {})} or None,
+                extra=extra,
                 task=self.task,
             )
         except Exception as e:

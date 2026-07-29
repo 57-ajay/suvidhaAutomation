@@ -115,7 +115,6 @@ export async function handleCancel(jobId: string): Promise<Response> {
     // RUNNING job still writes its own terminal when it stops.
     if (wasQueued && (job.taskId ?? "") === "challan-payment") {
         await finishChallanPayment({
-            vehicleNumber: job.vehicleNumber ?? "",
             challanNo: job.challanNo ?? job.requestId ?? "",
             outcome: "cancelled",
             error: "cancelled by user before the run started",

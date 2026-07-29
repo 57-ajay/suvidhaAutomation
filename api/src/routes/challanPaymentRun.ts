@@ -16,9 +16,8 @@
 //      jobId == "cp-" + normalized challan, so one challan has at most one
 //      active payment job and it never collides with border-tax / PUC /
 //      challan-settlement job ids.
-//   3. Seed aiAgentPaymentStatus.status = "queued" on
-//      challans/{VEH}/subChallans/{challanNo} so the client sees the challan
-//      move the moment the request is accepted.
+//   3. Seed aiAgentStatus.status = "queued" on subChallanRequests/{challanNo}
+//      so the client sees the challan move the moment the request is accepted.
 //   4. Enqueue. If THAT fails, the seed is rolled back to "failed" — a challan
 //      must never sit at "queued" with no job behind it.
 
@@ -125,7 +124,7 @@ export async function handleChallanPaymentRun(
     // still active (and only for 24h); this covers the case that actually
     // costs money — a retry, a double tap, or a re-queue of a challan whose
     // receipt is already stored.
-    const paid = await isChallanAlreadyPaid(vehicleNumber, challanNo);
+    const paid = await isChallanAlreadyPaid(challanNo);
     if (paid.paid) {
         return json(
             {
@@ -156,7 +155,6 @@ export async function handleChallanPaymentRun(
 
     // ── 3. seed the challan's status so the client sees it immediately ───
     const seed = await writeChallanPaymentStatus({
-        vehicleNumber,
         challanNo,
         status: "queued",
         force: true, // a retry re-opens a challan that ended failed/cancelled
@@ -193,7 +191,6 @@ export async function handleChallanPaymentRun(
     } catch (e: any) {
         console.error(`[run] challan-payment enqueue failed: ${e.message}`);
         await writeChallanPaymentStatus({
-            vehicleNumber,
             challanNo,
             status: "failed",
             reason: `enqueue failed: ${e.message}`,
