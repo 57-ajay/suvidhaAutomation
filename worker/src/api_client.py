@@ -274,3 +274,41 @@ async def save_challan_quotations(
         },
         timeout=90.0,
     )
+
+
+# ─── challan-payment ────────────────────────────────────────────────────
+
+
+async def save_challan_receipt(
+    *,
+    job_id: str,
+    request_id: str,
+    driver_id: str,
+    vehicle_number: str,
+    challan_no: str,
+    department: str,
+    pdf_base64: str,
+    task: str = "challan-payment",
+) -> dict:
+    """Upload the receipt PDF and mark the challan paid.
+
+    The API writes subChallanRequests/{challan_no} — aiAgentStatus.{status:
+    "completed", paid:true} plus root receipt{url, at} and subStatus:
+    "completed" — in ONE merge, so "money moved" and "here is the proof" can
+    never land separately. vehicle_number only shapes the GCS path.
+    Returns {ok, url} or {ok:false, error}.
+    """
+    return await _post(
+        "/api/internal/challan-payment/save-receipt",
+        {
+            "jobId": job_id,
+            "requestId": request_id,
+            "driverId": driver_id,
+            "vehicleNumber": vehicle_number,
+            "challanNo": challan_no,
+            "department": department,
+            "pdfBase64": pdf_base64,
+            "task": task,
+        },
+        timeout=120.0,
+    )

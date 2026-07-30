@@ -25,7 +25,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   :root {
     --bg:#0b0e11; --panel:#12161b; --panel2:#0f1318; --line:#1f262e; --text:#d7dde4;
     --dim:#76808a; --accent:#e8a33d; --ok:#4ade80; --bad:#f87171; --wait:#60a5fa;
-    --puc:#a78bfa; --bt:#38bdf8;
+    --puc:#a78bfa; --bt:#38bdf8; --cs:#34d399; --cp:#fb923c;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text);
@@ -85,6 +85,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   .task { font-size:10px; padding:2px 7px; border-radius:10px; text-transform:uppercase; letter-spacing:.05em; }
   .task-puc { color:var(--puc); border:1px solid var(--puc); }
   .task-bt { color:var(--bt); border:1px solid var(--bt); }
+  .task-cs { color:var(--cs); border:1px solid var(--cs); }
+  .task-cp { color:var(--cp); border:1px solid var(--cp); }
   .agent { margin-top:8px; font-size:12px; color:var(--dim); }
   .agent b { color:var(--text); font-weight:600; }
   .wait { margin-top:10px; padding:10px 12px; border:1px solid var(--wait); border-radius:6px; font-size:13px; color:var(--wait); }
@@ -112,6 +114,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   .rt.active { color:#111; font-weight:700; }
   .rt[data-rt=puc].active { background:var(--puc); border-color:var(--puc); }
   .rt[data-rt=border-tax].active { background:var(--bt); border-color:var(--bt); }
+  .rt[data-rt=challan-settlement].active { background:var(--cs); border-color:var(--cs); }
+  .rt[data-rt=challan-payment].active { background:var(--cp); border-color:var(--cp); }
   .runform { max-width:560px; background:var(--panel); border:1px solid var(--line);
              border-radius:8px; padding:18px 20px; }
   .field { margin-bottom:14px; }
@@ -159,6 +163,8 @@ export const DASHBOARD_HTML = `<!doctype html>
         <option value="">All tasks</option>
         <option value="border-tax">border-tax</option>
         <option value="puc-certificate">puc-certificate</option>
+        <option value="challan-settlement">challan-settlement</option>
+        <option value="challan-payment">challan-payment</option>
       </select>
     </label>
     <label>Status
@@ -210,6 +216,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   <div class="runtabs">
     <button class="rt active" data-rt="puc">PUC certificate</button>
     <button class="rt" data-rt="border-tax">Border tax</button>
+    <button class="rt" data-rt="challan-settlement">Challan settlement</button>
+    <button class="rt" data-rt="challan-payment">Challan payment</button>
   </div>
 
   <!-- PUC -->
@@ -320,6 +328,88 @@ export const DASHBOARD_HTML = `<!doctype html>
     <button type="submit" class="btn">Start border-tax run</button>
   </form>
 
+  <!-- CHALLAN SETTLEMENT -->
+  <form class="runform hidden" id="form-challan-settlement">
+    <div class="formrow">
+      <div class="field">
+        <label>Source</label>
+        <select id="cs-source">
+          <option value="app">app</option>
+          <option value="web">web</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>driverId</label>
+        <input type="text" id="cs-driverId" value="test_driver_001">
+      </div>
+    </div>
+    <div class="field">
+      <label>Vehicle number</label>
+      <input type="text" id="cs-vehicleNumber" placeholder="HR38AE8912">
+      <div class="hint">requestId and the Firestore doc are both the vehicle number — there is no separate id to generate</div>
+    </div>
+    <div class="field">
+      <label>Challan numbers</label>
+      <input type="text" id="cs-challanNumbers" placeholder="UP123455, 57693177, DL19016240430095546">
+      <div class="hint">comma or space separated. One phase per Virtual Courts department is built from the prefixes; unmapped ones come back in the response</div>
+    </div>
+    <div class="links" style="margin-top:0">
+      <button type="submit" class="btn">Start settlement scan</button>
+      <button type="button" class="ghost" id="cs-sample">Fill sample</button>
+    </div>
+  </form>
+
+  <!-- CHALLAN PAYMENT -->
+  <form class="runform hidden" id="form-challan-payment">
+    <div class="formrow">
+      <div class="field">
+        <label>Source</label>
+        <select id="cp-source">
+          <option value="web">web</option>
+          <option value="app">app</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>driverId</label>
+        <input type="text" id="cp-driverId" value="test_driver_001">
+      </div>
+    </div>
+    <div class="formrow">
+      <div class="field">
+        <label>Vehicle number</label>
+        <input type="text" id="cp-vehicleNumber" placeholder="HR38AE8912">
+      </div>
+      <div class="field">
+        <label>Challan number</label>
+        <input type="text" id="cp-challanNo" placeholder="UP123455">
+      </div>
+    </div>
+    <div class="formrow">
+      <div class="field">
+        <label>Mobile number (receives the OTP)</label>
+        <input type="text" id="cp-phoneNo" placeholder="9xxxxxxxxx">
+      </div>
+      <div class="field">
+        <label>Chassis number (full or last 4)</label>
+        <input type="text" id="cp-chassisNo" placeholder="…1234">
+      </div>
+    </div>
+    <div class="field">
+      <label>Department (optional override)</label>
+      <input type="text" id="cp-department" placeholder="derived from the challan prefix">
+      <div class="hint">exact dropdown text, e.g. <b>Uttar Pradesh(Traffic Department)</b> — only needed for a prefix the table doesn't cover</div>
+    </div>
+    <div class="hint" style="margin-bottom:12px">
+      One challan per run. requestId is the challan number; the job id is <b>cp-&lt;challan&gt;</b>.
+      The run parks at <b>waiting_for_human</b> — open the live view and do Get OTP → OTP → pay.
+      A challan that already has a receipt is refused with <b>409 already_paid</b>.
+    </div>
+    <div class="links" style="margin-top:0">
+      <button type="submit" class="btn">Start challan payment</button>
+      <button type="button" class="ghost" id="cp-sample">Fill sample</button>
+    </div>
+  </form>
+
   <div id="runresult"></div>
 </section>
 
@@ -358,6 +448,8 @@ function authHeaders(isJson){
 function taskBadge(t){
   if (t === 'puc-certificate') return '<span class="task task-puc">PUC</span>';
   if (t === 'border-tax' || !t) return '<span class="task task-bt">Border tax</span>';
+  if (t === 'challan-settlement') return '<span class="task task-cs">Challan settle</span>';
+  if (t === 'challan-payment') return '<span class="task task-cp">Challan pay</span>';
   return '<span class="task">' + esc(t) + '</span>';
 }
 
@@ -370,9 +462,16 @@ function showTab(name){
   if (name === 'jobs') fetchJobs();
 }
 
+var RUN_FORMS = {
+  'puc': 'form-puc',
+  'border-tax': 'form-border',
+  'challan-settlement': 'form-challan-settlement',
+  'challan-payment': 'form-challan-payment',
+};
+
 function showRun(which){
-  document.getElementById('form-puc').classList.toggle('hidden', which !== 'puc');
-  document.getElementById('form-border').classList.toggle('hidden', which !== 'border-tax');
+  for (var k in RUN_FORMS)
+    document.getElementById(RUN_FORMS[k]).classList.toggle('hidden', which !== k);
   var rts = document.querySelectorAll('.rt');
   for (var i=0;i<rts.length;i++) rts[i].classList.toggle('active', rts[i].getAttribute('data-rt') === which);
 }
@@ -554,6 +653,33 @@ async function submitRun(taskId, params, btn, source, path){
 
 function val(id){ var el = document.getElementById(id); return el ? el.value.trim() : ''; }
 
+function buildChallanSettlement(){
+  // The API takes an array; accept commas, spaces or newlines so a list
+  // pasted straight out of a settlement scan works unedited.
+  var raw = val('cs-challanNumbers');
+  var list = raw.split(/[\s,]+/).filter(function(x){ return x.length; });
+  return {
+    vehicleNumber: val('cs-vehicleNumber').toUpperCase(),
+    challanNumbers: list,
+    driverId: val('cs-driverId'),
+  };
+}
+
+function buildChallanPayment(){
+  var p = {
+    vehicleNumber: val('cp-vehicleNumber').toUpperCase(),
+    challanNo: val('cp-challanNo'),
+    phoneNo: val('cp-phoneNo'),
+    chassisNo: val('cp-chassisNo').toUpperCase(),
+    driverId: val('cp-driverId'),
+  };
+  // requestId is derived server-side as the challan number; sending a
+  // mismatched one is a 400, so we deliberately never send it.
+  var dept = val('cp-department');
+  if (dept) p.department = dept;
+  return p;
+}
+
 function buildPuc(){
   var p = {
     requestId: val('puc-requestId') || gen('puc'),
@@ -687,6 +813,17 @@ document.getElementById('puc-sample').addEventListener('click', function(){
   document.getElementById('puc-requestId').value = gen('puc');
 });
 
+document.getElementById('cs-sample').addEventListener('click', function(){
+  document.getElementById('cs-vehicleNumber').value = 'HR38AE8912';
+  document.getElementById('cs-challanNumbers').value = 'UP123455, 57693177';
+});
+document.getElementById('cp-sample').addEventListener('click', function(){
+  document.getElementById('cp-vehicleNumber').value = 'HR38AE8912';
+  document.getElementById('cp-challanNo').value = 'UP123455';
+  document.getElementById('cp-phoneNo').value = '9999999999';
+  document.getElementById('cp-chassisNo').value = 'MA3ERLF1S00187562';
+});
+
 // form submits
 document.getElementById('form-puc').addEventListener('submit', function(e){
   e.preventDefault();
@@ -697,6 +834,17 @@ document.getElementById('form-border').addEventListener('submit', function(e){
   var src2 = val('bt-source') || 'app';
   submitRun('border-tax', buildBorder(), e.submitter,
     src2, src2 === 'web' ? (val('bt-path') || 'fullyAutomated') : undefined);
+});
+// Both challan tasks are scripted-only, so neither sends a path.
+document.getElementById('form-challan-settlement').addEventListener('submit', function(e){
+  e.preventDefault();
+  submitRun('challan-settlement', buildChallanSettlement(), e.submitter,
+    val('cs-source') || 'app');
+});
+document.getElementById('form-challan-payment').addEventListener('submit', function(e){
+  e.preventDefault();
+  submitRun('challan-payment', buildChallanPayment(), e.submitter,
+    val('cp-source') || 'web');
 });
 
 // auto refresh (jobs view only)

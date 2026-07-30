@@ -1,18 +1,25 @@
 FROM python:3.12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Kolkata
 
 # Xvfb + VNC + noVNC/websockify for the live view, and the libraries headed
 # Chromium needs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb x11vnc novnc websockify ca-certificates curl \
+    xvfb x11vnc novnc websockify ca-certificates curl tzdata \
     fonts-liberation fonts-noto-color-emoji \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
     libasound2 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 libxshmfence1 \
     libx11-6 libx11-xcb1 libxcb1 libxext6 libglib2.0-0 libdbus-1-3 libexpat1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Chromium reads the container TZ, and the border-tax portals serialize their
+# datetime-local Tax From/Upto through the BROWSER's timezone. A UTC container
+# therefore pays for a permit shifted +05:30 from what the driver asked for —
+# invisible on date-only states (UP/MP), wrong on every HR/PB/HP receipt.
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 

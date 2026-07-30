@@ -12,6 +12,11 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - nredis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     networks:
       - internal
 
@@ -26,7 +31,20 @@ services:
     volumes:
       - ${SERVICE_ACCOUNT_FILE:-./service.json}:/secrets/service.json:ro
     depends_on:
-      - nredis
+      nredis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "process.exit((await fetch('http://localhost:3000/api/health')).ok ? 0 : 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     networks:
       internal:
       proxy:
@@ -42,19 +60,63 @@ services:
     environment:
       REDIS_URL: redis://nredis:6379
       API_URL: http://napi:3000
+      MAX_SLOTS: ${MAX_SLOTS:-2}
+      # Only read by nrouter (HGET job:<id> podIp -> ws://<podIp>:6080). In k8s
+      # this is the pod IP from the downward API; here the service name resolves
+      # to the same container. Harmless if you proxy noVNC straight to nworker.
+      POD_IP: nworker
+      # Host the live-view link should point at, as YOUR browser reaches it —
+      # i.e. whatever hostname Caddy serves noVNC on.
+      DOMAIN: ${DOMAIN:-localhost}
       # CAPTCHA_DEBUG_DIR: /tmp/captcha-debug
     # volumes:
-      # - ./captcha-debug:/tmp/captcha-debug
+    # - ./captcha-debug:/tmp/captcha-debug
     shm_size: "2gb"
     depends_on:
-      - nredis
-      - napi
+      nredis:
+        condition: service_healthy
+      napi:
+        condition: service_healthy
     networks:
       internal:
       proxy:
         aliases:
           - nworker
     # ports: ["6080:6080"]
+
+  # Live-view router — the same component k8s runs. NOT required in compose:
+  # with a single worker, nworker's own websockify already serves noVNC and
+  # resolves ?token=<jobId> from VNC_TOKEN_DIR, which is how this stack worked
+  # before k8s. Point Caddy at nworker:6080 for that (unchanged behaviour), or
+  # at nrouter:8080 to exercise the exact path the cluster uses.
+  nrouter:
+    build: ./router
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      REDIS_URL: redis://nredis:6379
+      WORKER_WS_PORT: 6080
+    depends_on:
+      nredis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "process.exit((await fetch('http://localhost:8080/healthz')).ok ? 0 : 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      internal:
+      proxy:
+        aliases:
+          - nrouter
+    # ports: ["8080:8080"]
 
 networks:
   internal:

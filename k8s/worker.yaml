@@ -17,7 +17,7 @@ spec:
       terminationGracePeriodSeconds: 3600
       containers:
         - name: worker
-          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/worker:v6
+          image: asia-south1-docker.pkg.dev/cabswale-ai/suvidha/worker:v8
           ports: [{ containerPort: 6080 }]
           envFrom: [{ secretRef: { name: suvidha-env } }]
           env:

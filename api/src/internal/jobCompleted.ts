@@ -10,6 +10,7 @@
 import { applyTerminal, saveAgentCost, ts } from "./requestDoc";
 import { STATUS } from "../lifecycle/statuses";
 import { setChallanCheckingFlag } from "./challanSettlement";
+import { finishChallanPayment } from "./challanPayment";
 export interface JobCompletedInput {
     jobId: string;
     requestId: string;
@@ -29,6 +30,20 @@ export async function handleJobCompleted(input: JobCompletedInput) {
     const { jobId, requestId, driverId } = input;
     if (!requestId || !driverId || !jobId) {
         return { ok: false, error: "jobId, requestId, driverId required" };
+    }
+
+    // challan-payment terminates on subChallanRequests/{challanNo}, not a
+    // request doc: applyTerminal/saveAgentCost would write aiAgentData +
+    // manualReview into the border-tax collection under a doc id that is
+    // really a challan number. requestId IS the challan number.
+    if ((input.task ?? "") === "challan-payment") {
+        const res = await finishChallanPayment({
+            challanNo: requestId,
+            outcome: input.status,
+            summary: input.summary,
+            error: input.error ?? null,
+        });
+        return res.ok ? { ok: true, status: res.status } : res;
     }
 
     // Persist cost first so it survives even if the terminal write races.

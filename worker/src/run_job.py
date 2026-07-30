@@ -26,6 +26,7 @@ from browser_config import build_browser_session
 from config import JOB_MAX_RUNTIME_SECS, JOB_TTL
 from engine.log import StepLogger
 from engine.pipeline import run_phases
+from engine.steps import force_ist_timezone
 from engine.types import RunContext, RunOutcome, ScriptedAbort
 from lifecycle.reporter import StatusReporter
 from lifecycle.status import PRE_PAYMENT, Status
@@ -109,6 +110,22 @@ async def amain(job_id: str, display: str) -> None:
             ctx_task = "challan-settlement"
             await reporter.set_status(Status.AI_AGENT_STARTED)
 
+        elif task_id == "challan-payment":
+            # ONE CHALLAN PER JOB on vcourts.gov.in: scripted up to the pay
+            # page, then the operator does Get OTP -> OTP -> payment on the
+            # live view while we watch for the receipt.
+            #
+            # The Firestore target is subChallanRequests/{challanNo}, and
+            # requestId IS the challan number, so the status-update payload
+            # already addresses the doc — nothing extra to carry.
+            from tasks.challan_payment.params import ChallanPaymentParams
+            from tasks.challan_payment.flow import PHASES as challan_payment_phases
+
+            params = ChallanPaymentParams.from_job(params_raw)
+            phases = challan_payment_phases
+            ctx_task = "challan-payment"
+            await reporter.set_status(Status.AI_AGENT_STARTED)
+
         elif task == "verifyPendingPayment":
             from tasks.border_tax.verify_pending import VerifyPendingParams
             from tasks.border_tax.registry import resolve_verify_phases
@@ -140,6 +157,14 @@ async def amain(job_id: str, display: str) -> None:
 
         session = build_browser_session(display)
         await asyncio.wait_for(session.start(), timeout=90)
+
+        # Pin the page clock to IST before ANY portal work. The container TZ
+        # (worker/Dockerfile) is the primary fix; this is the per-target
+        # backstop, and it is strict for border-tax because that is where a
+        # shifted datetime-local becomes a wrongly-paid tax window.
+        await force_ist_timezone(
+            session, log=log, strict=(ctx_task == "border-tax")
+        )
 
         ctx = RunContext(
             session=session,

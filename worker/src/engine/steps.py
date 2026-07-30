@@ -62,6 +62,96 @@ async def cdp_eval(session, expr: str):
     return getattr(res, "value", None) if res is not None else None
 
 
+async def force_ist_timezone(session, *, log: StepLogger | None = None,
+                             name: str = "force_ist_timezone",
+                             strict: bool = False) -> str:
+    """Pin the page's JS timezone to IST, then prove it took.
+
+    WHY: the border-tax portals (PB/HR/HP) use <input type="datetime-local">,
+    which has no timezone semantics — the page's own JS serializes it through
+    the BROWSER's zone. On a UTC container that silently shifts every Tax
+    From/Upto by +05:30, so the driver pays for a window 5.5h off the one they
+    asked for. Date-only states (UP/MP) hide the bug: midnight UTC is still the
+    same calendar date in IST.
+
+    The Dockerfile now sets TZ=Asia/Kolkata, which Chromium inherits; this is
+    the in-code backstop so a mis-deployed environment can never ship a shifted
+    (i.e. wrongly PAID) receipt again. Call it once, right after session.start()
+    and before any portal work.
+
+    `strict` aborts when the offset still isn't +330 — set it only for
+    border-tax, the one task where a shifted clock means a wrongly PAID
+    receipt. The challan/PUC tasks read the same portals but post no
+    datetime-local value, so taking them down for a border-tax invariant would
+    trade a real outage for a theoretical one. Verify the OFFSET, not the IANA id:
+    Chromium's ICU canonicalizes "Asia/Kolkata" to the legacy alias
+    "Asia/Calcutta", so an id compare fails every job even when the clock is
+    right. IST has no DST, so +330 is the one invariant worth asserting.
+    """
+    started = time.monotonic()
+    try:
+        cdp = await session.get_or_create_cdp_session()
+        await cdp.cdp_client.send.Emulation.setTimezoneOverride(
+            params={"timezoneId": "Asia/Kolkata"},
+            session_id=cdp.session_id,
+        )
+        info = await cdp_eval(
+            session,
+            "(function(){return {"
+            "id: Intl.DateTimeFormat().resolvedOptions().timeZone,"
+            "offsetMin: -new Date().getTimezoneOffset()"
+            "};})()",
+        )
+        tz_id = (info or {}).get("id")
+        offset_min = (info or {}).get("offsetMin")
+        if offset_min != 330 and not strict:
+            # Log loudly, keep going: this task's correctness doesn't hinge on
+            # the browser clock, and the container TZ is the real fix.
+            print(
+                f"[steps] WARNING browser tz={tz_id!r} offset={offset_min!r}min "
+                "(expected +330 IST) — check the worker image's TZ"
+            )
+        if offset_min != 330 and strict:
+            raise ScriptedAbort(
+                f"browser_timezone_not_ist: page reports tz={tz_id!r} with UTC "
+                f"offset {offset_min!r} min (need +330 = IST) even after the CDP "
+                f"Emulation.setTimezoneOverride — refusing to run, because a "
+                f"non-IST browser shifts every datetime-local tax window on the "
+                f"paid receipt.",
+                # Nothing was paid — this fires before any portal work — so by
+                # the money-line rule this is retryable, not manualReview.
+                terminal="cancelled",
+                reason="browser_timezone_not_ist",
+            )
+        if log is not None:
+            log.record(
+                StepLog(
+                    index=log.next_index(),
+                    name=name,
+                    status=StepStatus.OK,
+                    value=f"{tz_id} (UTC+{offset_min}min)",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            )
+        return str(tz_id)
+    except ScriptedAbort:
+        raise
+    except Exception as e:
+        # Never fail a run because the override itself errored — the container
+        # TZ is the primary fix and is already correct in a good deploy.
+        if log is not None:
+            log.record(
+                StepLog(
+                    index=log.next_index(),
+                    name=name,
+                    status=StepStatus.FAILED,
+                    error=f"{type(e).__name__}: {e}"[:500],
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            )
+        return ""
+
+
 async def current_url(session) -> str:
     try:
         return await cdp_eval(session, "window.location.href") or ""
