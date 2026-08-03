@@ -32,13 +32,15 @@ export async function handleJobCompleted(input: JobCompletedInput) {
         return { ok: false, error: "jobId, requestId, driverId required" };
     }
 
-    // challan-payment terminates on subChallanRequests/{challanNo}, not a
+    // challan-payment terminates on subChallanRequests/{requestId}, not a
     // request doc: applyTerminal/saveAgentCost would write aiAgentData +
-    // manualReview into the border-tax collection under a doc id that is
-    // really a challan number. requestId IS the challan number.
+    // manualReview into the BORDER-TAX collection under a doc id that belongs
+    // to a different collection entirely. requestId is the subChallanRequests
+    // auto-id the client generated; the challan number is not an address and
+    // is not needed here.
     if ((input.task ?? "") === "challan-payment") {
         const res = await finishChallanPayment({
-            challanNo: requestId,
+            requestId,
             outcome: input.status,
             summary: input.summary,
             error: input.error ?? null,

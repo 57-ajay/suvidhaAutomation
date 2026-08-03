@@ -113,9 +113,11 @@ export async function handleCancel(jobId: string): Promise<Response> {
     // challan-payment closes out on the subChallan doc instead (same reason as
     // in jobCompleted: there is no request doc to apply a terminal to). A
     // RUNNING job still writes its own terminal when it stops.
+    // requestId is the doc id; challanNo is a label and must NOT be a fallback
+    // address — it would create a phantom doc the client never reads.
     if (wasQueued && (job.taskId ?? "") === "challan-payment") {
         await finishChallanPayment({
-            challanNo: job.challanNo ?? job.requestId ?? "",
+            requestId: job.requestId ?? "",
             outcome: "cancelled",
             error: "cancelled by user before the run started",
         }).catch((e) =>
