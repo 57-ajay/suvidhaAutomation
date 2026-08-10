@@ -40,6 +40,16 @@ Phase walk (each state builds its PHASES from these):
 ...and the wizard stops there — the next phase is scripted.handover, which
 sets humanHandover and gives the browser to the operator on the live view.
 
+Blocking-popup retry: the portal's background validity fetches (insurance /
+fitness / PUCC / road tax) are flaky and throw spurious "renew your ..."
+blockers a human-paced run never sees. Every blocking popup detected in
+these phases therefore restarts the whole wizard from open_portal
+(RestartFrom) until SCRIPTED_POPUP_MAX_ATTEMPTS total attempts are spent;
+only then does the run abort — still cancelled, still carrying the portal's
+own message (see _blocked_popup_restart_or_abort). SCRIPTED_NEXT_DELAY_SECS
+adds extra breathing room after every Next click before the next page is
+touched. Both knobs live in config.py / the environment.
+
 Money line: everything in this module is pre-payment; every abort is
 terminal="cancelled" (retryable, no money moved).
 """
@@ -51,6 +61,7 @@ import json
 import time
 
 import api_client
+from config import SCRIPTED_NEXT_DELAY_SECS, SCRIPTED_POPUP_MAX_ATTEMPTS
 from engine.steps import (
     abort_if_popup_text,
     cdp_eval,
@@ -66,7 +77,7 @@ from engine.steps import (
     wait_for_selector,
     wait_for_url,
 )
-from engine.types import RunContext, ScriptedAbort, StepLog, StepStatus
+from engine.types import RestartFrom, RunContext, ScriptedAbort, StepLog, StepStatus
 
 from .extract_amount import extract_and_save_border_tax_amount
 from .manual_entry import (
@@ -135,6 +146,57 @@ def _classify_popup(text: str) -> str:
     return "blocking"
 
 
+def _blocked_popup_restart_or_abort(
+    ctx: RunContext,
+    *,
+    name: str,
+    popup_text: str,
+    final_message: str,
+    reason: str | None = None,
+) -> None:
+    """A blocking portal popup was detected during form-fill (pre-handover).
+
+    The portal fetches validity data (insurance/fitness/PUCC/road tax) through
+    flaky background APIs — the same vehicle that trips "renew your ..." here
+    almost always passes on a fresh manual pass. So instead of dying on the
+    first blocker, rerun the whole wizard from the portal landing page while
+    the attempt budget lasts (SCRIPTED_POPUP_MAX_ATTEMPTS counts TOTAL
+    attempts; the counter lives in ctx.scratch and survives restarts). Once
+    the budget is spent, abort exactly like before — cancelled, carrying the
+    portal's own words.
+
+    Money line: only wizard.py (phases 1-5, strictly pre-payment) calls this;
+    handover.py never does, so a restart can never rewind past a payment.
+    """
+    attempt = int(ctx.scratch.get("popup_attempt") or 1)
+    budget = max(1, SCRIPTED_POPUP_MAX_ATTEMPTS)
+    if attempt < budget:
+        ctx.scratch["popup_attempt"] = attempt + 1
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name=f"{name}.restart",
+                status=StepStatus.RETRIED,
+                attempt=attempt,
+                value=(
+                    f"blocking popup -> restarting wizard "
+                    f"(attempt {attempt + 1}/{budget}): {popup_text[:120]}"
+                ),
+            )
+        )
+        try:
+            from redis_client import job_key
+
+            ctx.r.hset(job_key(ctx.job_id), "popupRestarts", str(attempt))
+        except Exception:
+            pass
+        raise RestartFrom(
+            "open_portal", f"portal popup: {popup_text[:80] or 'no text'}"
+        )
+    suffix = f" (still blocked after {budget} attempts)" if budget > 1 else ""
+    raise ScriptedAbort(final_message + suffix, terminal="cancelled", reason=reason)
+
+
 async def abort_on_blocking_popup(
     ctx: RunContext, name: str, *, seconds: float = 3.5
 ) -> None:
@@ -171,10 +233,12 @@ async def abort_on_blocking_popup(
                 )
             )
             await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
-            raise ScriptedAbort(
-                "the portal blocked the request: "
+            _blocked_popup_restart_or_abort(
+                ctx,
+                name=name,
+                popup_text=text,
+                final_message="the portal blocked the request: "
                 + (text[:300] or "an error popup with no readable text"),
-                terminal="cancelled",
             )
         await asyncio.sleep(0.5)
     ctx.log.record(
@@ -522,10 +586,17 @@ async def owner_info(ctx: RunContext) -> None:
     outcome = await _wait_for_owner_info_outcome(ctx)
 
     if outcome == "validity_popup":
-        raise ScriptedAbort(
-            f"vehicle {p.vehicleNumber} has no valid insurance/fitness/PUCC "
-            "— renew before attempting border tax payment",
-            terminal="cancelled",
+        # Usually the portal's own background RC fetch failing, not a real
+        # expiry — restart the wizard while the popup budget lasts (the popup
+        # text itself is already in the runLog from the outcome poll).
+        _blocked_popup_restart_or_abort(
+            ctx,
+            name="p3.owner_outcome",
+            popup_text="validity popup after Get Details",
+            final_message=(
+                f"vehicle {p.vehicleNumber} has no valid insurance/fitness/PUCC "
+                "— renew before attempting border tax payment"
+            ),
         )
     if outcome == "timeout":
         raise ScriptedAbort(
@@ -536,12 +607,19 @@ async def owner_info(ctx: RunContext) -> None:
     if outcome == "pending_popup":
         # Scripted v1: no auto-clear. The web operator can clear it on the
         # portal ("Check Pending Transaction" under Border Tax Payment) and
-        # re-run — that is exactly the old handover-family behavior.
-        raise ScriptedAbort(
-            f"a previous transaction for {p.vehicleNumber} is still pending "
-            "on the portal — clear it via 'Check Pending Transaction' under "
-            "Border Tax Payment, then retry",
-            terminal="cancelled",
+        # re-run — that is exactly the old handover-family behavior. A restart
+        # cannot clear it either, but the popup budget is cheap and keeps the
+        # rule simple ("every blocking popup retries"); the final abort keeps
+        # this message + reason so the operator playbook is unchanged.
+        _blocked_popup_restart_or_abort(
+            ctx,
+            name="p3.owner_outcome",
+            popup_text="pending-transaction popup after Get Details",
+            final_message=(
+                f"a previous transaction for {p.vehicleNumber} is still pending "
+                "on the portal — clear it via 'Check Pending Transaction' under "
+                "Border Tax Payment, then retry"
+            ),
             reason="pending_transaction_popup",
         )
 
@@ -622,6 +700,10 @@ async def owner_info(ctx: RunContext) -> None:
         )
 
     await click_by_text(ctx.session, "Next", log=ctx.log, name="p3.click_next", tag="button")
+    if SCRIPTED_NEXT_DELAY_SECS > 0:
+        await sleep_seconds(
+            SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p3.post_next_delay"
+        )
     await abort_on_blocking_popup(ctx, "p3.post_next_popup_check")
     await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p3.settle")
 
@@ -666,14 +748,23 @@ def make_vehicle_info(
             "renew before attempting border tax payment"
         )
 
-        await abort_if_popup_text(
-            ctx.session,
-            VALIDITY_KEYWORDS,
-            validity_abort,
-            log=ctx.log,
-            name="p4.check_validity_on_load",
-            close_selector=VALIDITY_CLOSE,
-        )
+        try:
+            await abort_if_popup_text(
+                ctx.session,
+                VALIDITY_KEYWORDS,
+                validity_abort,
+                log=ctx.log,
+                name="p4.check_validity_on_load",
+                close_selector=VALIDITY_CLOSE,
+            )
+        except ScriptedAbort as e:
+            _blocked_popup_restart_or_abort(
+                ctx,
+                name="p4.check_validity_on_load",
+                popup_text=e.message,
+                final_message=e.message,
+                reason=e.reason,
+            )
 
         await wait_for_selector(
             ctx.session,
@@ -696,17 +787,30 @@ def make_vehicle_info(
                 has_distance=manual_has_distance,
                 datetime_local_dates=manual_datetime_dates,
             )
-            await abort_if_popup_text(
-                ctx.session,
-                VALIDITY_KEYWORDS,
-                validity_abort,
-                log=ctx.log,
-                name="p4.check_validity_after_manual_fill",
-                close_selector=VALIDITY_CLOSE,
-            )
+            try:
+                await abort_if_popup_text(
+                    ctx.session,
+                    VALIDITY_KEYWORDS,
+                    validity_abort,
+                    log=ctx.log,
+                    name="p4.check_validity_after_manual_fill",
+                    close_selector=VALIDITY_CLOSE,
+                )
+            except ScriptedAbort as e:
+                _blocked_popup_restart_or_abort(
+                    ctx,
+                    name="p4.check_validity_after_manual_fill",
+                    popup_text=e.message,
+                    final_message=e.message,
+                    reason=e.reason,
+                )
             await click_by_text(
                 ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
             )
+            if SCRIPTED_NEXT_DELAY_SECS > 0:
+                await sleep_seconds(
+                    SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p4.post_next_delay"
+                )
             await abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
             await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
             return
@@ -786,14 +890,23 @@ def make_vehicle_info(
                 )
             await asyncio.sleep(1.5)
 
-        await abort_if_popup_text(
-            ctx.session,
-            VALIDITY_KEYWORDS,
-            validity_abort,
-            log=ctx.log,
-            name="p4.check_validity_after_permit",
-            close_selector=VALIDITY_CLOSE,
-        )
+        try:
+            await abort_if_popup_text(
+                ctx.session,
+                VALIDITY_KEYWORDS,
+                validity_abort,
+                log=ctx.log,
+                name="p4.check_validity_after_permit",
+                close_selector=VALIDITY_CLOSE,
+            )
+        except ScriptedAbort as e:
+            _blocked_popup_restart_or_abort(
+                ctx,
+                name="p4.check_validity_after_permit",
+                popup_text=e.message,
+                final_message=e.message,
+                reason=e.reason,
+            )
 
         # Service Type.
         service_val = (
@@ -833,14 +946,23 @@ def make_vehicle_info(
                     )
             await asyncio.sleep(1.0)
 
-        await abort_if_popup_text(
-            ctx.session,
-            VALIDITY_KEYWORDS,
-            validity_abort,
-            log=ctx.log,
-            name="p4.check_validity_after_service",
-            close_selector=VALIDITY_CLOSE,
-        )
+        try:
+            await abort_if_popup_text(
+                ctx.session,
+                VALIDITY_KEYWORDS,
+                validity_abort,
+                log=ctx.log,
+                name="p4.check_validity_after_service",
+                close_selector=VALIDITY_CLOSE,
+            )
+        except ScriptedAbort as e:
+            _blocked_popup_restart_or_abort(
+                ctx,
+                name="p4.check_validity_after_service",
+                popup_text=e.message,
+                final_message=e.message,
+                reason=e.reason,
+            )
 
         # Distance (HR only) — fill only when present-but-empty; no effect on
         # the computed tax.
@@ -862,6 +984,10 @@ def make_vehicle_info(
         await click_by_text(
             ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
         )
+        if SCRIPTED_NEXT_DELAY_SECS > 0:
+            await sleep_seconds(
+                SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p4.post_next_delay"
+            )
         await abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
         await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
 
@@ -1063,6 +1189,10 @@ def make_tax_info(
         await click_by_text(
             ctx.session, "Next", log=ctx.log, name="p5.click_next", tag="button"
         )
+        if SCRIPTED_NEXT_DELAY_SECS > 0:
+            await sleep_seconds(
+                SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p5.post_next_delay"
+            )
         await abort_on_blocking_popup(ctx, "p5.post_next_popup_check")
         await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p5.settle")
 

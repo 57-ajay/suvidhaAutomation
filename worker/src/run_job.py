@@ -148,9 +148,17 @@ async def amain(job_id: str, display: str) -> None:
             if path == "scripted":
                 from scripted.params import BorderTaxParams as ScriptedParams
                 from scripted.registry import resolve_phases as scripted_phases
+                from config import SCRIPTED_POPUP_MAX_ATTEMPTS
 
                 params = ScriptedParams.from_job(params_raw)
                 phases = scripted_phases(params.state)
+                # Blocking-popup recovery: the wizard raises RestartFrom at
+                # most (SCRIPTED_POPUP_MAX_ATTEMPTS - 1) times before it
+                # aborts with the portal's own message, so giving the
+                # pipeline cap the full budget guarantees the pipeline's
+                # generic "portal kept blocking" abort can never pre-empt
+                # the wizard's message-preserving one.
+                max_restarts = max(1, SCRIPTED_POPUP_MAX_ATTEMPTS)
             else:
                 params = BorderTaxParams.from_job(params_raw)
                 phases = resolve_phases(params.state)
