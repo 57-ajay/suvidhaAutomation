@@ -70,6 +70,13 @@ SCRIPTED_POPUP_MAX_ATTEMPTS = int(os.environ.get("SCRIPTED_POPUP_MAX_ATTEMPTS", 
 # default: a pending transaction then cancels with a clear retry message.
 AUTO_CLEAR_PENDING = _bool("AUTO_CLEAR_PENDING", "false")
 
+# Scripted (web) path's own pending-transaction auto-clear switch. ON by
+# default — the scripted wizard clears the pending transaction itself
+# (AI-solved captcha, see scripted/pending_clear.py) instead of burning its
+# restart budget on a popup a restart can never fix. Independent of
+# AUTO_CLEAR_PENDING so the two paths can be toggled separately.
+SCRIPTED_AUTO_CLEAR_PENDING = _bool("SCRIPTED_AUTO_CLEAR_PENDING", "true")
+
 
 # Captcha solving policy (global). "ai" tries Vertex OCR first and SILENTLY
 # (no captcha image uploaded, no captcha status written) and falls back to the

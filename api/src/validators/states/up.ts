@@ -57,7 +57,14 @@ export const upValidator: StateValidator = {
         const invalid: FieldError[] = [];
 
         const vehicleNumber = str(raw.vehicleNumber);
-        let duration = Number(raw.duration) || 0;
+        // Optional day count; sanity-bounded below so a garbage value
+        // 400s instead of feeding addDays an Invalid Date (-> 500).
+        const durationNum = Number(raw.duration);
+        const duration = Math.trunc(durationNum) || 0;
+        const durationSent =
+            raw.duration != null && String(raw.duration).trim() !== "";
+        const durationUsable =
+            Number.isFinite(durationNum) && duration >= 1 && duration <= 3650;
         const taxMode = str(raw.taxMode)?.toUpperCase();
         const taxFrom = normalizeDate(raw.taxFrom);
         let taxUpto = normalizeDate(raw.taxUpto);
@@ -79,18 +86,34 @@ export const upValidator: StateValidator = {
             } else missing.push("taxFrom");
         }
         // taxUpto only matters in DAYS mode; otherwise the portal owns it.
+        // UP is SAME_DAY (plain type="date" portal, no time component): a
+        // 1-day permit runs taxFrom -> taxFrom, N days -> taxFrom + (N-1).
+        // When the caller sends a duration it is AUTHORITATIVE: clients have
+        // shipped taxUpto precomputed as taxFrom + duration (the datetime
+        // states' convention), which bills one extra day here — so a
+        // duration-derived value overrides any client-sent taxUpto.
         const needsTaxUpto = taxMode === "DAYS";
-        if (needsTaxUpto && !taxUpto) {
-            if (duration === 1) { taxUpto = taxFrom! }
-            else {
-                taxUpto = addDays(taxFrom!, duration - 1);
+        if (needsTaxUpto && taxFrom && durationUsable) {
+            const computed = addDays(taxFrom, duration - 1);
+            if (taxUpto && taxUpto !== computed) {
+                console.log(
+                    `[up] taxUpto ${taxUpto} disagrees with duration=` +
+                    `${duration} (-> ${computed}); using the duration`,
+                );
             }
+            taxUpto = computed;
         }
-
         if (!taxUpto) {
+            // No duration and no taxUpto: default to a 1-day (same-day) permit.
             taxUpto = taxFrom;
         }
 
+        if (durationSent && !durationUsable) {
+            invalid.push({
+                field: "duration",
+                reason: "must be an integer between 1 and 3650 (days)",
+            });
+        }
         if (vehicleNumber && !isVehicleNumber(vehicleNumber)) {
             invalid.push({
                 field: "vehicleNumber",

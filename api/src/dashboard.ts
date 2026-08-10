@@ -313,6 +313,11 @@ export const DASHBOARD_HTML = `<!doctype html>
         <label>Tax upto (DAYS only)</label>
         <input type="date" id="bt-taxUpto">
       </div>
+      <div class="field" id="bt-duration-wrap">
+        <label>Duration in days (DAYS only)</label>
+        <input type="number" id="bt-duration" min="1" max="3650" step="1"
+               placeholder="1 = same-day states end same day">
+      </div>
     </div>
     <div class="formrow">
       <div class="field">
@@ -713,6 +718,16 @@ function buildBorder(){
     entryDistrict: val('bt-entryDistrict'),
   };
   if (val('bt-taxMode') === 'DAYS' && val('bt-taxUpto')) p.taxUpto = val('bt-taxUpto');
+  // duration is AUTHORITATIVE on the API for DAYS mode (it recomputes
+  // taxUpto per the state's same-day/24h convention), so send it whenever
+  // the operator typed one.
+  if (val('bt-taxMode') === 'DAYS' && val('bt-duration')) p.duration = val('bt-duration');
+  // fullyAutomated validators mandate paymentMethod (pinned to UPI — the
+  // pipeline IS UPI); scripted runs get it shimmed API-side instead, and
+  // the scripted-only states keep their own defaults.
+  var btSrc = val('bt-source') || 'app';
+  var btPath = btSrc === 'web' ? (val('bt-path') || 'fullyAutomated') : 'fullyAutomated';
+  if (btPath === 'fullyAutomated') p.paymentMethod = 'UPI';
   if (val('bt-entryCheckpoint')) p.entryCheckpoint = val('bt-entryCheckpoint');
   document.getElementById('bt-requestId').value = p.requestId;
   // strip empties so the API applies its own defaults / reports missing
@@ -814,6 +829,7 @@ keyInput.addEventListener('change', function(){
 // taxMode -> taxUpto visibility
 document.getElementById('bt-taxMode').addEventListener('change', function(e){
   document.getElementById('bt-taxUpto-wrap').classList.toggle('hidden', e.target.value !== 'DAYS');
+  document.getElementById('bt-duration-wrap').classList.toggle('hidden', e.target.value !== 'DAYS');
 });
 
 // sample fill
