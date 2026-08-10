@@ -64,7 +64,7 @@ HANDOVER_CONFIG = HandoverConfig(
 PHASES: list[Phase] = [
     Phase("open_portal", open_portal, enter_status=Status.AI_AGENT_STARTED, max_secs=150),
     Phase("select_service", select_service, max_secs=150),
-    Phase("owner_info", owner_info, max_secs=300),
+    Phase("owner_info", owner_info, max_secs=420),  # incl. pending-clear
     Phase("vehicle_info", vehicle_info, max_secs=180),
     Phase("tax_info", tax_info, max_secs=180),
     make_handover_phase(HANDOVER_CONFIG),

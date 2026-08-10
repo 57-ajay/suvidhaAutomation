@@ -1,27 +1,32 @@
-"""Pending-transaction detection + auto-clear on the CheckPost portal.
+# worker/src/scripted/pending_clear.py
+"""Pending-transaction auto-clear for the SCRIPTED (web) path.
 
-Ported from main's _pending_clear.py — same JS probes, same selectors (live
-HTML, CheckPost V4.7.x), same outcome semantics. Two public surfaces:
+Deliberate copy of tasks/border_tax/pending_clear.py adapted for this path
+(module isolation over DRY, by decision): same portal flow — home ->
+"Check Pending Transaction" -> vehicle number -> captcha -> Go -> first
+row's bank icon -> outcome poll — with ONE deliberate difference: the page
+captcha is solved by AI ONLY (Vertex OCR, silently, up to
+MAX_AI_CAPTCHA_ATTEMPTS). The scripted path's human seam is the web
+operator on the live view, not the app user, so the fully-automated path's
+save-captcha/app fallback would show the captcha to the wrong audience.
+If OCR never gets through, the clear reports ("failed", ...) and the
+wizard's pending budget decides: retry the whole clear on a fresh pass or
+abort with the manual-clear instruction.
 
-wait_for_owner_info_outcome(): after "Get Details", a single JS evaluation
-distinguishes (popups FIRST — with a blocker up, the district select never
-renders): pending_popup / validity_popup / district_ready / timeout.
+Outcomes (same semantics as the fully-automated module):
+  "Please try after X Minutes"                  -> ("still_on_hold", hint)
+  URL DoubleVerification|/bank/ or body says
+  "transaction is fail"|"initiate transaction
+  again"                                        -> ("cleared", "")
+  nothing decisive in BANK_OUTCOME_POLL_SECS    -> ("failed", last context)
 
-clear_pending_transaction(): the documented recovery. The Angular router
-rewrites direct deep links to "/", so we always land on the portal home and
-click the "Check Pending Transaction" routerLink. The page captcha is solved
-with Vertex OCR (background recovery, the user never sees it), Go is
-classified as results / captcha-mismatch / pending, the first row's
-bank icon gets the triple-click treatment (icon + td + synthetic event —
-the Angular binding moves around), and the outcome poll decides:
-  "Please try after X Minutes"            -> ("still_on_hold", hint)
-  URL DoubleVerification|/bank/ or body
-  "transaction is fail"|"initiate
-  transaction again"                      -> ("cleared", "")
-  nothing decisive in 30s                 -> ("failed", last context)
+Gated by SCRIPTED_AUTO_CLEAR_PENDING (default ON): when off, the wizard
+keeps the old behavior — abort with the "clear it via 'Check Pending
+Transaction', then retry" operator message.
 
-Gated by AUTO_CLEAR_PENDING (default OFF): when off, the state runner
-cancels with a "clear the pending transaction and retry" message instead.
+Money line: the clear runs strictly pre-payment (it either voids the stale
+transaction or does nothing), so every failure here stays terminal
+"cancelled" — retryable, no money moved.
 """
 
 from __future__ import annotations
@@ -31,89 +36,43 @@ import json
 import re
 import time
 
-from config import AUTO_CLEAR_PENDING
-
-# from engine.canvas import wait_and_capture_canvas_png
-from engine.log import StepLogger
+from config import MAX_AI_CAPTCHA_ATTEMPTS, SCRIPTED_AUTO_CLEAR_PENDING
+from engine.canvas import wait_and_capture_canvas_png
 from engine.steps import (
     cdp_eval,
     click_by_text,
-    # current_url,
     fill,
     navigate,
     sleep_seconds,
     wait_for_selector,
 )
 from engine.types import RunContext, ScriptedAbort, StepLog, StepStatus
-
-# from llm.vertex import ocr_image
-# from redis_client import job_key
-from lifecycle.status import Status
-from .captcha_user import solve_captcha
-from .manual_entry import dismiss_chassis_bug_popup
+from llm.vertex import ocr_image
 
 # ─── Selectors (live HTML, CheckPost V4.7.x — state-agnostic SPA shell) ─
 URL_PORTAL_HOME = "https://services.parivahan.gov.in/checkpostv4/#/"
 SEL_PENDING_TX_LINK = 'a[href="#/public/payment/ChecklTransactionStatus"]'
 SEL_PENDING_VEHICLE_INPUT = "input#inputVehicleNo"
-SEL_PENDING_CAPTCHA_CONTAINER = "div#captcha"
 SEL_PENDING_CAPTCHA_CANVAS = "div#captcha canvas"
 SEL_PENDING_CAPTCHA_INPUT = "input#inputcaptcha"
 # Refresh is a SIBLING of div#captcha (NOT a child).
 SEL_PENDING_CAPTCHA_REFRESH = "div#captcha + button, button.btn-primary.m-left"
 SEL_PENDING_GO_BTN = "button.go-but"
 
-# ─── Tunables (main's values) ───────────────────────────────────────────
-OWNER_OUTCOME_POLL_SECS = 30.0
-OWNER_OUTCOME_POLL_TICK_SECS = 0.5
+# ─── Tunables (the fully-automated module's values) ─────────────────────
 GO_SUBMIT_POLL_SECS = 10.0
 BANK_OUTCOME_POLL_SECS = 30.0
 BANK_OUTCOME_POLL_TICK_SECS = 0.5
 BANK_OUTCOME_DEBUG_TICK_SECS = 3.0
-MAX_CAPTCHA_ATTEMPTS = 5
 LINK_WAIT_TIMEOUT_SECS = 20
 PAGE_LOAD_TIMEOUT_SECS = 20
 
 
 def auto_clear_enabled() -> bool:
-    return AUTO_CLEAR_PENDING
+    return SCRIPTED_AUTO_CLEAR_PENDING
 
 
-# ─── JS probes (verbatim from main) ─────────────────────────────────────
-
-_OWNER_INFO_OUTCOME_JS = """
-(function() {
-  var popups = document.querySelectorAll('.swal2-popup');
-  for (var i = 0; i < popups.length; i++) {
-    var r = popups[i].getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) continue;
-    var text = (popups[i].textContent || '');
-    var lower = text.toLowerCase();
-    if (lower.indexOf('pending for verification') !== -1
-        || (lower.indexOf('check pending transaction') !== -1
-            && lower.indexOf('pending') !== -1)) {
-      return {state: 'pending_popup', text: text.substring(0, 240)};
-    }
-    if (/(insurance|fitness|pucc|expired|renew|not\\s*valid)/i.test(text)) {
-      return {state: 'validity_popup', text: text.substring(0, 240)};
-    }
-    if (lower.indexOf('no data found') !== -1) {
-      return {state: 'manual_entry', text: text.substring(0, 240)};
-    }
-    if (lower.indexOf('chassis') !== -1) {
-      return {state: 'chassis_bug', text: text.substring(0, 240)};
-    }
-  }
-  var district = document.querySelector('select#floatingDistrict');
-  if (district) {
-    var rect = district.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      return {state: 'district_ready'};
-    }
-  }
-  return {state: 'pending'};
-})()
-"""
+# ─── JS probes (verbatim from tasks/border_tax/pending_clear.py) ────────
 
 _DISMISS_SWAL_JS = """
 (function() {
@@ -207,98 +166,6 @@ _BANK_OUTCOME_JS = """
 """
 
 
-# ─── Public: owner-info outcome polling ─────────────────────────────────
-
-
-async def wait_for_owner_info_outcome(
-    session,
-    log: StepLogger,
-    *,
-    name: str = "p3.wait_owner_outcome",
-    timeout: float = OWNER_OUTCOME_POLL_SECS,
-    tick: float = OWNER_OUTCOME_POLL_TICK_SECS,
-) -> str:
-    """Poll after Get Details for one of: district_ready / manual_entry /
-    pending_popup / validity_popup / timeout. Never raises — the caller
-    branches. The popup text rides along in the StepLog so the run-log shows the
-    routing.
-
-    manual_entry = VAHAN had no RC data ("No data found for this vehicle
-    number..") — the caller fetches the RC record on demand and fills the
-    owner/vehicle forms by hand.
-
-    A spurious "enter chassis no." popup (a known gov-site bug) is clicked away
-    inline and polling continues, so it never turns into a false timeout."""
-    started = time.monotonic()
-    deadline = started + timeout
-    last_state, last_text = "pending", ""
-
-    while time.monotonic() < deadline:
-        res = await cdp_eval(session, _OWNER_INFO_OUTCOME_JS)
-        state = (res or {}).get("state", "pending")
-        last_state = state
-        last_text = (res or {}).get("text", "") or last_text
-
-        if state == "district_ready":
-            log.record(
-                StepLog(
-                    index=log.next_index(),
-                    name=name,
-                    status=StepStatus.OK,
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                    value="district_ready",
-                )
-            )
-            return "district_ready"
-        if state == "manual_entry":
-            log.record(
-                StepLog(
-                    index=log.next_index(),
-                    name=name,
-                    status=StepStatus.OK,
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                    value=f"manual_entry: {last_text[:120]}",
-                )
-            )
-            return "manual_entry"
-        if state == "chassis_bug":
-            # Spurious portal popup — click OK and keep polling for the real
-            # outcome (district will render once it's dismissed).
-            await dismiss_chassis_bug_popup(
-                session, log=log, name=f"{name}.chassis_bug"
-            )
-            await asyncio.sleep(tick)
-            continue
-        if state in ("pending_popup", "validity_popup"):
-            log.record(
-                StepLog(
-                    index=log.next_index(),
-                    name=name,
-                    status=StepStatus.FAILED,
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                    value=f"{state}: {last_text[:120]}",
-                )
-            )
-            return state
-        await asyncio.sleep(tick)
-
-    log.record(
-        StepLog(
-            index=log.next_index(),
-            name=name,
-            status=StepStatus.FAILED,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            value=f"timeout (last_state={last_state})",
-            error=f"no decisive outcome within {timeout:.0f}s",
-        )
-    )
-    return "timeout"
-
-
-def owner_outcome_popup_text(res_text: str) -> str:
-    return res_text
-
-
 # ─── Internals ──────────────────────────────────────────────────────────
 
 
@@ -317,7 +184,7 @@ async def _dismiss_all(ctx: RunContext, name: str) -> None:
         pass
 
 
-async def _refresh_pending_captcha(ctx: RunContext) -> None:
+async def _refresh_captcha(ctx: RunContext) -> None:
     try:
         await cdp_eval(
             ctx.session,
@@ -331,66 +198,155 @@ async def _refresh_pending_captcha(ctx: RunContext) -> None:
     await asyncio.sleep(1.2)
 
 
-async def _solve_pending_captcha(ctx: RunContext) -> None:
-    """Solve the check-pending captcha under the global CAPTCHA_MODE. AI mode
-    OCRs it silently (no DB write, no captcha status); human / AI-fallback shows
-    it as pendingTransactionCaptcha. Raises ScriptedAbort(cancelled) if it
-    can't be solved (nothing irreversible has happened)."""
-
-    async def _submit() -> bool:
-        # Click Go, then poll the submit for the results table.
-        try:
-            await cdp_eval(
-                ctx.session,
-                "(function(s){var e=document.querySelector(s);"
-                "if(e){e.click();return true;}return false;})("
-                + json.dumps(SEL_PENDING_GO_BTN)
-                + ")",
-            )
-        except Exception as e:
+async def _capture_captcha(ctx: RunContext) -> str | None:
+    """Wait for the visible captcha canvas to PAINT, refreshing at most once
+    on a blank — the same capture discipline as the fully-automated path."""
+    await asyncio.sleep(1.0)  # let the section mount before the first probe
+    for round_no in (1, 2):
+        b64, detail = await wait_and_capture_canvas_png(
+            ctx.session,
+            timeout=6.0,
+            tick=0.6,
+            scope_selector=SEL_PENDING_CAPTCHA_CANVAS,
+        )
+        if b64:
             ctx.log.record(
                 StepLog(
                     index=ctx.log.next_index(),
-                    name="pending.click_go",
-                    status=StepStatus.FAILED,
-                    error=f"{type(e).__name__}: {e}",
+                    name="pending.captcha_capture",
+                    status=StepStatus.OK,
+                    attempt=round_no,
+                    value=detail,
                 )
             )
+            return b64
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name="pending.captcha_capture",
+                status=StepStatus.RETRIED,
+                attempt=round_no,
+                error=detail,
+            )
+        )
+        if round_no == 1:
+            await _refresh_captcha(ctx)
+    return None
+
+
+async def _click_go(ctx: RunContext) -> bool:
+    try:
+        await cdp_eval(
+            ctx.session,
+            "(function(s){var e=document.querySelector(s);"
+            "if(e){e.click();return true;}return false;})("
+            + json.dumps(SEL_PENDING_GO_BTN)
+            + ")",
+        )
+        return True
+    except Exception as e:
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name="pending.click_go",
+                status=StepStatus.FAILED,
+                error=f"{type(e).__name__}: {e}",
+            )
+        )
+        return False
+
+
+async def _go_outcome(ctx: RunContext) -> str:
+    """Poll after Go for the results table or a captcha-mismatch popup.
+    Returns 'results' / 'captcha_mismatch' / 'pending' (no decisive signal).
+    A failed eval is a 'nothing yet' tick, never an error — the page may be
+    re-rendering under the poll."""
+    deadline = time.monotonic() + GO_SUBMIT_POLL_SECS
+    while time.monotonic() < deadline:
+        try:
+            res = await cdp_eval(ctx.session, _GO_SUBMIT_STATE_JS)
+        except Exception:
+            await asyncio.sleep(0.5)
+            continue
+        state = (res or {}).get("state", "pending")
+        if state == "results":
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name="pending.go_submit",
+                    status=StepStatus.OK,
+                    value=f"results rows={res.get('count')}",
+                )
+            )
+            return "results"
+        if state == "captcha_mismatch":
+            return "captcha_mismatch"
+        await asyncio.sleep(0.5)
+    return "pending"
+
+
+async def _solve_captcha_ai(ctx: RunContext) -> bool:
+    """Silent Vertex-OCR attempts against the check-pending captcha; no image
+    upload, no captcha status — nobody is shown a captcha the AI is solving.
+    Returns True once Go produced the results table, False when the OCR
+    budget (MAX_AI_CAPTCHA_ATTEMPTS) is exhausted or capture failed."""
+    for attempt in range(1, MAX_AI_CAPTCHA_ATTEMPTS + 1):
+        b64 = await _capture_captcha(ctx)
+        if b64 is None:
             return False
 
-        deadline = time.monotonic() + GO_SUBMIT_POLL_SECS
-        while time.monotonic() < deadline:
-            res = await cdp_eval(ctx.session, _GO_SUBMIT_STATE_JS)
-            state = (res or {}).get("state", "pending")
-            if state == "results":
-                ctx.log.record(
-                    StepLog(
-                        index=ctx.log.next_index(),
-                        name="pending.go_submit",
-                        status=StepStatus.OK,
-                        value=f"results rows={res.get('count')}",
-                    )
+        text, cost = await ocr_image(b64)
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name="pending.captcha_ai_ocr",
+                status=StepStatus.OK if text != "UNREADABLE" else StepStatus.RETRIED,
+                attempt=attempt,
+                value=text,
+                ai_cost_usd=cost,
+            )
+        )
+        if text == "UNREADABLE":
+            await _refresh_captcha(ctx)
+            continue
+
+        try:
+            await fill(
+                ctx.session,
+                SEL_PENDING_CAPTCHA_INPUT,
+                text,
+                log=ctx.log,
+                name=f"pending.captcha_ai_fill_{attempt}",
+            )
+        except ScriptedAbort:
+            # Input not fillable this instant — burn the attempt, not the run.
+            await _refresh_captcha(ctx)
+            continue
+        if await _click_go(ctx) and await _go_outcome(ctx) == "results":
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name="pending.captcha_ai_accepted",
+                    status=StepStatus.OK,
+                    attempt=attempt,
                 )
-                return True
-            if state == "captcha_mismatch":
-                return False
-            await asyncio.sleep(0.5)
-        return False  # neither results nor mismatch -> treat as not advanced
+            )
+            return True
 
-    async def _rejected() -> bool:
-        res = await cdp_eval(ctx.session, _GO_SUBMIT_STATE_JS)
-        return (res or {}).get("state") == "captcha_mismatch"
+        # Click failure, mismatch, or nothing decisive: one burned attempt —
+        # clear any popup, refresh, try again (the twin's policy).
+        await _dismiss_all(ctx, f"pending.captcha_ai_dismiss_{attempt}")
+        await _refresh_captcha(ctx)
 
-    await solve_captcha(
-        ctx,
-        status=Status.PENDING_TRANSACTION_CAPTCHA,
-        stage="pending",
-        input_selector=SEL_PENDING_CAPTCHA_INPUT,
-        refresh_selector=SEL_PENDING_CAPTCHA_REFRESH,
-        submit_action=_submit,
-        is_rejected=_rejected,
-        canvas_scope=SEL_PENDING_CAPTCHA_CANVAS,
+    ctx.log.record(
+        StepLog(
+            index=ctx.log.next_index(),
+            name="pending.captcha_ai_exhausted",
+            status=StepStatus.FAILED,
+            error=f"{MAX_AI_CAPTCHA_ATTEMPTS} OCR attempts failed",
+        )
     )
+    return False
 
 
 # ─── Public: pending-tx clear flow ──────────────────────────────────────
@@ -468,12 +424,12 @@ async def clear_pending_transaction(ctx: RunContext) -> tuple[str, str]:
         name="pending.fill_vehicle",
     )
 
-    await _solve_pending_captcha(ctx)
-    if ctx.reporter.current == Status.PENDING_TRANSACTION_CAPTCHA:
-        await ctx.reporter.set_status(Status.PENDING_TRANSACTION)
-
-    # if not await _solve_pending_captcha(ctx):
-    #     return ("failed", f"captcha not accepted after {MAX_CAPTCHA_ATTEMPTS} attempts")
+    if not await _solve_captcha_ai(ctx):
+        return (
+            "failed",
+            f"the captcha was not accepted within {MAX_AI_CAPTCHA_ATTEMPTS} "
+            "AI attempts",
+        )
 
     res = await cdp_eval(ctx.session, _CLICK_BANK_ICON_JS)
     if not res or not res.get("ok"):
@@ -490,15 +446,15 @@ async def clear_pending_transaction(ctx: RunContext) -> tuple[str, str]:
     # Outcome poll with periodic debug context (gov portal is slow).
     started = time.monotonic()
     last_debug = 0.0
-    last_ctx = {}
+    last_ctx: dict = {}
     while time.monotonic() - started < BANK_OUTCOME_POLL_SECS:
         try:
             res = await cdp_eval(ctx.session, _BANK_OUTCOME_JS)
         except Exception:
             # The "cleared" signal IS a navigation (URL gains /bank/ or
             # DoubleVerification) — evaluating mid-navigation can throw while
-            # the context is torn down. Keep polling; the next tick reads the
-            # settled page.
+            # the context is torn down. That's evidence the poll should keep
+            # going, never an error.
             await asyncio.sleep(BANK_OUTCOME_POLL_TICK_SECS)
             continue
         state = (res or {}).get("state", "pending")
@@ -523,7 +479,7 @@ async def clear_pending_transaction(ctx: RunContext) -> tuple[str, str]:
         if now - last_debug >= BANK_OUTCOME_DEBUG_TICK_SECS:
             last_debug = now
             print(
-                f"[pending_clear] poll t={now - started:.0f}s "
+                f"[scripted.pending_clear] poll t={now - started:.0f}s "
                 f"url={last_ctx.get('url', '?')} "
                 f"popups={last_ctx.get('popups', [])}"
             )

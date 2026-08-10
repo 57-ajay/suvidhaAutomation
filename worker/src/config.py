@@ -50,9 +50,32 @@ MAX_USER_CAPTCHA_ATTEMPTS = int(os.environ.get("MAX_USER_CAPTCHA_ATTEMPTS", "3")
 # (manualReview) — money may have moved, so never a silent cancel.
 WEB_HANDOVER_TIMEOUT_SECS = int(os.environ.get("WEB_HANDOVER_TIMEOUT_SECS", "420"))
 
+# Scripted (web) path: extra breathing room after every wizard "Next" click
+# before the next page is touched. The portal fetches the vehicle's validity
+# data (insurance / fitness / PUCC / road tax) through background APIs on
+# each step; racing a slow fetch makes the portal raise spurious
+# "renew your ..." blockers that a human-paced run never sees.
+SCRIPTED_NEXT_DELAY_SECS = float(os.environ.get("SCRIPTED_NEXT_DELAY_SECS", "1.0"))
+
+# Scripted (web) path: TOTAL form-fill attempts when the portal raises a
+# blocking popup before handover (3 = first pass + up to 2 full restarts from
+# the portal landing page). Those popups are usually the flaky background
+# fetches above and a fresh pass clears them; a genuinely blocked vehicle
+# still ends cancelled with the portal's own message once the budget is
+# spent. 1 = restarts disabled (the old first-popup-aborts behavior).
+# Pre-payment only: the wizard never restarts once human handover has begun.
+SCRIPTED_POPUP_MAX_ATTEMPTS = int(os.environ.get("SCRIPTED_POPUP_MAX_ATTEMPTS", "3"))
+
 # Pending-transaction auto-clear (Vertex-OCR background captcha). OFF by
 # default: a pending transaction then cancels with a clear retry message.
 AUTO_CLEAR_PENDING = _bool("AUTO_CLEAR_PENDING", "false")
+
+# Scripted (web) path's own pending-transaction auto-clear switch. ON by
+# default — the scripted wizard clears the pending transaction itself
+# (AI-solved captcha, see scripted/pending_clear.py) instead of burning its
+# restart budget on a popup a restart can never fix. Independent of
+# AUTO_CLEAR_PENDING so the two paths can be toggled separately.
+SCRIPTED_AUTO_CLEAR_PENDING = _bool("SCRIPTED_AUTO_CLEAR_PENDING", "true")
 
 
 # Captcha solving policy (global). "ai" tries Vertex OCR first and SILENTLY
