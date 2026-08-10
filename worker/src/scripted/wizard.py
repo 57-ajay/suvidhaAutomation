@@ -143,6 +143,10 @@ SEL_DISCLAIMER_CAPTCHA = "input#inputcap"
 # re-clicked; total attempts per transition before the stall budget kicks in.
 NEXT_VERIFY_TIMEOUT_SECS = 12.0
 NEXT_CLICK_ATTEMPTS = 3
+# After Calculate Fee/Tax: how long the portal gets to render the fee table.
+# Server-side calculation regularly takes 30+ seconds under load, and until
+# the table renders Next is a no-op and the amount extract reads no_rows.
+CALC_RESULT_TIMEOUT_SECS = 45.0
 
 
 # ─── Popup classification (copied from the auto path) ────────────────────
@@ -363,7 +367,7 @@ async def _click_next_verified(
     failure. Advanced = a POSITIVE sighting of `ready_selector` only (the
     wizard appends sections, so "old section gone" carries no signal, and a
     failed probe must never count as progress). While polling, popups are
-    classified exactly like abort_on_blocking_popup: benign -> dismissed,
+    classified via _route_visible_popup: benign -> dismissed,
     blocking -> popup budget. No progress after `attempts` clicks -> stall
     budget."""
     for attempt in range(1, attempts + 1):
@@ -394,40 +398,9 @@ async def _click_next_verified(
 
         deadline = time.monotonic() + verify_timeout
         while time.monotonic() < deadline:
-            st = await read_popup_state(ctx.session)
-            if st.get("present"):
-                text = (st.get("text") or "").strip()
-                if _classify_popup(text) == "benign":
-                    ctx.log.record(
-                        StepLog(
-                            index=ctx.log.next_index(),
-                            name=f"{name}.popup",
-                            status=StepStatus.OK,
-                            value=f"benign popup: {text[:80]}",
-                        )
-                    )
-                    await dismiss_popup(
-                        ctx.session, log=ctx.log, name=f"{name}.dismiss_benign"
-                    )
-                    await asyncio.sleep(0.5)
-                    continue
-                ctx.log.record(
-                    StepLog(
-                        index=ctx.log.next_index(),
-                        name=f"{name}.popup",
-                        status=StepStatus.FAILED,
-                        value=f"error_icon={st.get('error')}",
-                        error=text[:300] or "(error popup with no text)",
-                    )
-                )
-                await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
-                _blocked_popup_restart_or_abort(
-                    ctx,
-                    name=name,
-                    popup_text=text,
-                    final_message="the portal blocked the request: "
-                    + (text[:300] or "an error popup with no readable text"),
-                )
+            if await _route_visible_popup(ctx, f"{name}.popup"):
+                await asyncio.sleep(0.5)
+                continue
             if await _is_visible(ctx.session, ready_selector) is True:
                 ctx.log.record(
                     StepLog(
@@ -465,56 +438,102 @@ async def _click_next_verified(
     )
 
 
-async def abort_on_blocking_popup(
-    ctx: RunContext, name: str, *, seconds: float = 3.5
-) -> None:
-    """The portal validates ON the Next/Calculate click and raises its popup a
-    beat later — so this watchdog runs right AFTER every submit. Any popup
-    that isn't explicitly benign ends the run as cancelled, carrying the
-    portal's own words (no money has moved at these steps)."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        st = await read_popup_state(ctx.session)
-        if st.get("present"):
-            text = (st.get("text") or "").strip()
-            if _classify_popup(text) == "benign":
-                ctx.log.record(
-                    StepLog(
-                        index=ctx.log.next_index(),
-                        name=name,
-                        status=StepStatus.OK,
-                        value=f"benign popup: {text[:80]}",
-                    )
-                )
-                await dismiss_popup(
-                    ctx.session, log=ctx.log, name=f"{name}.dismiss_benign"
-                )
-                await asyncio.sleep(0.5)
-                continue
-            ctx.log.record(
-                StepLog(
-                    index=ctx.log.next_index(),
-                    name=name,
-                    status=StepStatus.FAILED,
-                    value=f"error_icon={st.get('error')}",
-                    error=text[:300] or "(error popup with no text)",
-                )
-            )
-            await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
-            _blocked_popup_restart_or_abort(
-                ctx,
+async def _route_visible_popup(ctx: RunContext, name: str) -> bool:
+    """One popup tick for a poll loop: no popup -> False; benign popup ->
+    dismissed, True (caller continues polling); blocking popup -> logged,
+    dismissed, and routed into the popup budget (raises)."""
+    st = await read_popup_state(ctx.session)
+    if not st.get("present"):
+        return False
+    text = (st.get("text") or "").strip()
+    if _classify_popup(text) == "benign":
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
                 name=name,
-                popup_text=text,
-                final_message="the portal blocked the request: "
-                + (text[:300] or "an error popup with no readable text"),
+                status=StepStatus.OK,
+                value=f"benign popup: {text[:80]}",
             )
-        await asyncio.sleep(0.5)
+        )
+        await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.dismiss_benign")
+        return True
     ctx.log.record(
         StepLog(
             index=ctx.log.next_index(),
             name=name,
-            status=StepStatus.OK,
-            value="no blocking popup",
+            status=StepStatus.FAILED,
+            value=f"error_icon={st.get('error')}",
+            error=text[:300] or "(error popup with no text)",
+        )
+    )
+    await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
+    _blocked_popup_restart_or_abort(
+        ctx,
+        name=name,
+        popup_text=text,
+        final_message="the portal blocked the request: "
+        + (text[:300] or "an error popup with no readable text"),
+    )
+    return True  # unreachable — the router always raises
+
+
+_FEE_ROWS_JS = (
+    "(function(){"
+    "var tables=document.querySelectorAll('table');"
+    "for(var i=0;i<tables.length;i++){"
+    "  var thead=tables[i].querySelector('thead');"
+    "  var h=((thead&&thead.innerText)||'').toLowerCase();"
+    "  if(h.indexOf('tax/fee particulars')>=0 && h.indexOf('amount')>=0){"
+    "    return tables[i].querySelectorAll('tbody tr').length;"
+    "  }"
+    "}"
+    "return 0;})()"
+)
+
+
+async def _wait_fee_calculation(
+    ctx: RunContext,
+    *,
+    name: str = "p5.wait_fee_calculation",
+    timeout: float = CALC_RESULT_TIMEOUT_SECS,
+) -> None:
+    """After the Calculate Fee/Tax click, wait for the fee table's rows.
+
+    The portal computes the fee server-side and can take 30+ seconds under
+    load; until the table renders, Next is silently ignored and a too-early
+    extract loses the amount (borderTaxAmount stays the \"0\" sentinel). Any
+    popup raised by the calculation is classified on the way, exactly like
+    the old fixed post-calculate watchdog. Times out QUIETLY: extraction is
+    best-effort and the verified Next still guards the advance."""
+    started = time.monotonic()
+    deadline = started + timeout
+    while time.monotonic() < deadline:
+        if await _route_visible_popup(ctx, name):
+            await asyncio.sleep(0.5)
+            continue
+        try:
+            rows = await cdp_eval(ctx.session, _FEE_ROWS_JS)
+        except Exception:
+            rows = 0
+        if isinstance(rows, (int, float)) and rows > 0:
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name=name,
+                    status=StepStatus.OK,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    value=f"fee table rendered ({int(rows)} row(s))",
+                )
+            )
+            return
+        await asyncio.sleep(1.0)
+    ctx.log.record(
+        StepLog(
+            index=ctx.log.next_index(),
+            name=name,
+            status=StepStatus.RETRIED,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            error=f"fee table did not render within {timeout:.0f}s",
         )
     )
 
@@ -1523,8 +1542,9 @@ def make_tax_info(
             name="p5.click_calculate",
             tag="button",
         )
-        await abort_on_blocking_popup(ctx, "p5.post_calculate_popup_check", seconds=6.0)
-        await sleep_seconds(4.0, log=ctx.log, name="p5.wait_calculation")
+        # Wait for the fee rows (popups classified inline) so the extract
+        # below reads the real amount and the first Next click sticks.
+        await _wait_fee_calculation(ctx)
 
         # Best-effort: never aborts; "0" sentinel lands in borderTaxAmount.
         await extract_and_save_border_tax_amount(ctx)
