@@ -68,7 +68,14 @@ export const hrValidator: StateValidator = {
         const invalid: FieldError[] = [];
 
         const vehicleNumber = str(raw.vehicleNumber);
-        const duration = Number(raw.duration) || 0;
+        // Optional day count; sanity-bounded below so a garbage value
+        // 400s instead of feeding addDays an Invalid Date (-> 500).
+        const durationNum = Number(raw.duration);
+        const duration = Math.trunc(durationNum) || 0;
+        const durationSent =
+            raw.duration != null && String(raw.duration).trim() !== "";
+        const durationUsable =
+            Number.isFinite(durationNum) && duration >= 1 && duration <= 3650;
         const taxMode = str(raw.taxMode)?.toUpperCase();
         const taxFrom = normalizeDate(raw.taxFrom);
         let taxUpto = normalizeDate(raw.taxUpto);
@@ -102,15 +109,34 @@ export const hrValidator: StateValidator = {
         }
 
         // taxUpto only matters in DAYS mode; otherwise the portal owns it.
+        // HR is NO_SAME_DAY (datetime-local portal, exact-24h billing): a
+        // 1-day permit runs taxFrom HH:MM -> (taxFrom + 1) HH:MM. When the
+        // caller sends a duration it is AUTHORITATIVE and overrides any
+        // client-precomputed taxUpto, so both fields can never disagree.
         const needsTaxUpto = taxMode === "DAYS";
-        if (needsTaxUpto && !taxUpto && duration >= 1) {
-            // HR is NO_SAME_DAY: duration=1 -> taxFrom + 1.
-            taxUpto = addDays(taxFrom!, duration);
+        if (needsTaxUpto && taxFrom && durationUsable) {
+            const computed = addDays(taxFrom, duration);
+            if (taxUpto && taxUpto !== computed) {
+                console.log(
+                    `[hr] taxUpto ${taxUpto} disagrees with duration=` +
+                    `${duration} (-> ${computed}); using the duration`,
+                );
+            }
+            taxUpto = computed;
         }
-        if (!taxUpto) {
-            taxUpto = taxFrom;
+        if (needsTaxUpto && !taxUpto) {
+            // A same-day span is invalid on this portal (Tax Upto's min is
+            // pinned above Tax From), so with neither field usable the old
+            // taxUpto = taxFrom fallback shipped a job the portal rejects.
+            missing.push("taxUpto (or duration)");
         }
 
+        if (durationSent && !durationUsable) {
+            invalid.push({
+                field: "duration",
+                reason: "must be an integer between 1 and 3650 (days)",
+            });
+        }
         if (vehicleNumber && !isVehicleNumber(vehicleNumber)) {
             invalid.push({
                 field: "vehicleNumber",
@@ -123,10 +149,13 @@ export const hrValidator: StateValidator = {
                 reason: `must be one of ${[...VALID_TAX_MODES].join("/")}`,
             });
         }
-        if (needsTaxUpto && taxFrom && taxUpto && taxUpto < taxFrom) {
+        if (needsTaxUpto && taxFrom && taxUpto && taxUpto <= taxFrom) {
+            // Same-day is invalid too: this datetime-local portal pins Tax
+            // Upto's min above Tax From, so an explicit taxUpto == taxFrom
+            // would ship a job the portal rejects.
             invalid.push({
                 field: "taxUpto",
-                reason: "must be on or after taxFrom",
+                reason: "must be after taxFrom (same-day span is invalid here)",
             });
         }
         if (paymentMethod && paymentMethod !== "UPI") {

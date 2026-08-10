@@ -20,11 +20,13 @@ Phase walk (each state builds its PHASES from these):
                    district -> checkpost (exact -> case-insensitive -> FIRST
                    option, which naturally covers the old "first_option"
                    strategy states UK/TN/BR) -> Next.
-                   A "pending transaction" popup ABORTS with a clear
-                   "clear it first, then retry" message — the scripted path
-                   has a human operator who can clear it on the portal
-                   themselves, so v1 ships no auto-clear machinery (that is
-                   the old handover-family behavior; see TASK.md follow-ups).
+                   A "pending transaction" popup is AUTO-CLEARED (gated by
+                   SCRIPTED_AUTO_CLEAR_PENDING, default on): the scripted
+                   copy of the clear flow (scripted.pending_clear) drives
+                   "Check Pending Transaction" with an AI-solved captcha and
+                   the wizard restarts on a clean slate; when the flag is
+                   off (or the budget is spent) the run aborts with the
+                   manual-clear operator instruction, as before.
                    VAHAN "No data found" -> on-demand RC fetch + manual fill
                    (scripted.manual_entry), same as the auto path.
   vehicle_info     validity checks around every field; Vehicle Category /
@@ -49,6 +51,14 @@ only then does the run abort — still cancelled, still carrying the portal's
 own message (see _blocked_popup_restart_or_abort). SCRIPTED_NEXT_DELAY_SECS
 adds extra breathing room after every Next click before the next page is
 touched. Both knobs live in config.py / the environment.
+
+Page-stall retry: the same restart treatment (own budget, same size) covers
+pages that never render — a selector/URL wait timing out, or a Next click
+that leaves the wizard on the same section (see
+_stalled_page_restart_or_abort / _click_next_verified). In the container
+the portal's Angular bundle can crawl past the fixed waits that always pass
+locally; a fresh pass usually loads fine, so dying on the first
+"page element did not appear" wasted runs a restart would have saved.
 
 Money line: everything in this module is pre-payment; every abort is
 terminal="cancelled" (retryable, no money moved).
@@ -78,7 +88,9 @@ from engine.steps import (
     wait_for_url,
 )
 from engine.types import RestartFrom, RunContext, ScriptedAbort, StepLog, StepStatus
+from lifecycle.status import Status
 
+from . import pending_clear
 from .extract_amount import extract_and_save_border_tax_amount
 from .manual_entry import (
     dismiss_chassis_bug_popup,
@@ -124,6 +136,13 @@ PERMIT_SET_TIMEOUT_SECS = 15
 CHECKPOINT_POPULATE_TIMEOUT = 10
 OWNER_OUTCOME_POLL_SECS = 30.0
 OWNER_OUTCOME_POLL_TICK_SECS = 0.5
+# The disclaimer page (captcha + Pay Online) the p5 Next lands on — the page
+# the operator takes over. Same SPA shell on every state.
+SEL_DISCLAIMER_CAPTCHA = "input#inputcap"
+# How long a Next click gets to actually swap the wizard section before it is
+# re-clicked; total attempts per transition before the stall budget kicks in.
+NEXT_VERIFY_TIMEOUT_SECS = 12.0
+NEXT_CLICK_ATTEMPTS = 3
 
 
 # ─── Popup classification (copied from the auto path) ────────────────────
@@ -195,6 +214,255 @@ def _blocked_popup_restart_or_abort(
         )
     suffix = f" (still blocked after {budget} attempts)" if budget > 1 else ""
     raise ScriptedAbort(final_message + suffix, terminal="cancelled", reason=reason)
+
+
+def _stalled_page_restart_or_abort(
+    ctx: RunContext,
+    *,
+    name: str,
+    detail: str,
+    final_message: str,
+) -> None:
+    """A wizard page never rendered (selector/URL wait timed out) or a Next
+    click refused to advance the section.
+
+    Locally this almost never happens; in the container the portal's Angular
+    bundle can crawl (proxied egress, shared CPU under load) past the fixed
+    waits, and a fresh pass usually loads fine — so rerun the whole wizard
+    from the landing page while the stall budget lasts instead of dying on
+    the first "page element did not appear". The counter is separate from
+    the popup budget so a popup-heavy run can't eat the stall retries and
+    vice versa; both are pre-payment only (handover never restarts)."""
+    attempt = int(ctx.scratch.get("stall_attempt") or 1)
+    budget = max(1, SCRIPTED_POPUP_MAX_ATTEMPTS)
+    if attempt < budget:
+        ctx.scratch["stall_attempt"] = attempt + 1
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name=f"{name}.restart",
+                status=StepStatus.RETRIED,
+                attempt=attempt,
+                value=(
+                    f"page stalled -> restarting wizard "
+                    f"(attempt {attempt + 1}/{budget}): {detail[:120]}"
+                ),
+            )
+        )
+        try:
+            from redis_client import job_key
+
+            ctx.r.hset(job_key(ctx.job_id), "stallRestarts", str(attempt))
+        except Exception:
+            pass
+        raise RestartFrom("open_portal", f"page stalled: {detail[:80]}")
+    raise ScriptedAbort(
+        final_message + f" (page still stalled after {budget} attempts)",
+        terminal="cancelled",
+        reason="portal_page_stalled",
+    )
+
+
+async def _is_visible(session, selector: str) -> bool | None:
+    """One-shot visibility probe (same non-zero-rect rule as wait_for_selector).
+    Tri-state: True/False from a successful probe, None when the eval itself
+    failed (context torn down mid-navigation, CDP hiccup) — callers must not
+    read a failed probe as evidence about the page."""
+    try:
+        res = await cdp_eval(
+            session,
+            "(function(s){var els=document.querySelectorAll(s);"
+            "for(var i=0;i<els.length;i++){"
+            "  var r=els[i].getBoundingClientRect();"
+            "  if(r.width>0 && r.height>0) return true;"
+            "}"
+            "return false;})(" + json.dumps(selector) + ")",
+        )
+        return bool(res)
+    except Exception:
+        return None
+
+
+async def _route_popup_or_stall(
+    ctx: RunContext, *, name: str, detail: str, final_message: str
+) -> None:
+    """A wait timed out. If a blocking popup is on screen it is the real
+    blocker — route it into the popup budget (with its own text); otherwise
+    treat the timeout as a page stall and use the stall budget."""
+    try:
+        st = await read_popup_state(ctx.session)
+    except Exception:
+        st = {}
+    if st.get("present"):
+        text = (st.get("text") or "").strip()
+        if _classify_popup(text) != "benign":
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name=name,
+                    status=StepStatus.FAILED,
+                    error=text[:300] or "(error popup with no text)",
+                )
+            )
+            await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
+            _blocked_popup_restart_or_abort(
+                ctx,
+                name=name,
+                popup_text=text,
+                final_message="the portal blocked the request: "
+                + (text[:300] or "an error popup with no readable text"),
+            )
+    _stalled_page_restart_or_abort(
+        ctx, name=name, detail=detail, final_message=final_message
+    )
+
+
+async def _wait_selector_or_restart(
+    ctx: RunContext, selector: str, *, name: str, timeout: int
+) -> None:
+    """wait_for_selector, but a timeout restarts the wizard (stall budget)
+    instead of aborting the run outright."""
+    try:
+        await wait_for_selector(
+            ctx.session, selector, log=ctx.log, name=name, timeout=timeout
+        )
+    except ScriptedAbort as e:
+        await _route_popup_or_stall(
+            ctx, name=name, detail=e.message, final_message=e.message
+        )
+
+
+async def _wait_url_or_restart(
+    ctx: RunContext, contains: str, *, name: str, timeout: int
+) -> None:
+    """wait_for_url, but a timeout restarts the wizard (stall budget)."""
+    try:
+        await wait_for_url(
+            ctx.session, contains, log=ctx.log, name=name, timeout=timeout
+        )
+    except ScriptedAbort as e:
+        await _route_popup_or_stall(
+            ctx, name=name, detail=e.message, final_message=e.message
+        )
+
+
+async def _click_next_verified(
+    ctx: RunContext,
+    *,
+    name: str,
+    ready_selector: str,
+    attempts: int = NEXT_CLICK_ATTEMPTS,
+    verify_timeout: float = NEXT_VERIFY_TIMEOUT_SECS,
+) -> None:
+    """Click the wizard's Next and VERIFY the section actually swapped.
+
+    On a slow page the click can land before Angular wires the handler (or
+    hit a stale still-visible button), leaving the run on the SAME page; the
+    old fixed post-click sleep then let the next phase die on a selector
+    timeout — the "page element did not appear" / "same page opens again"
+    failure. Advanced = a POSITIVE sighting of `ready_selector` only (the
+    wizard appends sections, so "old section gone" carries no signal, and a
+    failed probe must never count as progress). While polling, popups are
+    classified exactly like abort_on_blocking_popup: benign -> dismissed,
+    blocking -> popup budget. No progress after `attempts` clicks -> stall
+    budget."""
+    for attempt in range(1, attempts + 1):
+        try:
+            await click_by_text(
+                ctx.session,
+                "Next",
+                log=ctx.log,
+                name=f"{name}.click" if attempt == 1 else f"{name}.click_{attempt}",
+                tag="button",
+            )
+        except ScriptedAbort as e:
+            # The button itself never became clickable — poll below anyway
+            # (the page may still be mounting) and let the budget decide.
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name=f"{name}.click_missing",
+                    status=StepStatus.RETRIED,
+                    attempt=attempt,
+                    error=e.message[:200],
+                )
+            )
+        if SCRIPTED_NEXT_DELAY_SECS > 0:
+            await sleep_seconds(
+                SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name=f"{name}.post_delay"
+            )
+
+        deadline = time.monotonic() + verify_timeout
+        while time.monotonic() < deadline:
+            st = await read_popup_state(ctx.session)
+            if st.get("present"):
+                text = (st.get("text") or "").strip()
+                if _classify_popup(text) == "benign":
+                    ctx.log.record(
+                        StepLog(
+                            index=ctx.log.next_index(),
+                            name=f"{name}.popup",
+                            status=StepStatus.OK,
+                            value=f"benign popup: {text[:80]}",
+                        )
+                    )
+                    await dismiss_popup(
+                        ctx.session, log=ctx.log, name=f"{name}.dismiss_benign"
+                    )
+                    await asyncio.sleep(0.5)
+                    continue
+                ctx.log.record(
+                    StepLog(
+                        index=ctx.log.next_index(),
+                        name=f"{name}.popup",
+                        status=StepStatus.FAILED,
+                        value=f"error_icon={st.get('error')}",
+                        error=text[:300] or "(error popup with no text)",
+                    )
+                )
+                await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
+                _blocked_popup_restart_or_abort(
+                    ctx,
+                    name=name,
+                    popup_text=text,
+                    final_message="the portal blocked the request: "
+                    + (text[:300] or "an error popup with no readable text"),
+                )
+            if await _is_visible(ctx.session, ready_selector) is True:
+                ctx.log.record(
+                    StepLog(
+                        index=ctx.log.next_index(),
+                        name=f"{name}.advanced",
+                        status=StepStatus.OK,
+                        attempt=attempt,
+                        selector=ready_selector,
+                    )
+                )
+                await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name=f"{name}.settle")
+                return
+            await asyncio.sleep(0.5)
+
+        ctx.log.record(
+            StepLog(
+                index=ctx.log.next_index(),
+                name=f"{name}.not_advanced",
+                status=StepStatus.RETRIED,
+                attempt=attempt,
+                error=(
+                    f"page did not advance to {ready_selector} within "
+                    f"{verify_timeout:.0f}s"
+                ),
+            )
+        )
+
+    await _route_popup_or_stall(
+        ctx,
+        name=name,
+        detail=f"'Next' never advanced the wizard to {ready_selector}",
+        final_message=(
+            "the portal page kept reloading without advancing past this step"
+        ),
+    )
 
 
 async def abort_on_blocking_popup(
@@ -375,11 +643,96 @@ async def _select_checkpoint_with_fallback(
         await asyncio.sleep(0.5)
 
 
-# ─── Owner-info outcome probe (probe only — NO auto-clear machinery) ─────
-# Copied from the auto path's pending_clear.wait_for_owner_info_outcome. The
-# clear_pending_transaction flow (its captcha solver etc.) is intentionally
-# NOT ported: the scripted path aborts on a pending transaction with a clear
-# operator instruction instead. See the module docstring.
+# ─── Pending-transaction handling ────────────────────────────────────────
+
+
+async def _handle_pending_transaction(ctx: RunContext) -> None:
+    """The portal raised the pending-transaction popup after Get Details.
+
+    With SCRIPTED_AUTO_CLEAR_PENDING on (the default), run the scripted
+    clear flow — scripted.pending_clear navigates "Check Pending
+    Transaction", solves the page captcha with Vertex OCR (AI only; the web
+    operator never sees it), and voids the stale transaction — then restart
+    the wizard from the landing page. A failed clear retries the whole pass
+    (fresh wizard + fresh clear) while the budget lasts; a portal-imposed
+    hold ("try after X minutes") aborts immediately since retrying now
+    cannot help. With the flag off, the old behavior: abort with the
+    manual-clear operator instruction. Always raises; never returns."""
+    p = ctx.params
+    manual_msg = (
+        f"a previous transaction for {p.vehicleNumber} is still pending "
+        "on the portal — clear it via 'Check Pending Transaction' under "
+        "Border Tax Payment, then retry"
+    )
+    if not pending_clear.auto_clear_enabled():
+        raise ScriptedAbort(
+            manual_msg, terminal="cancelled", reason="pending_transaction_popup"
+        )
+
+    attempt = int(ctx.scratch.get("pending_clear_attempt") or 0) + 1
+    budget = max(1, SCRIPTED_POPUP_MAX_ATTEMPTS)
+    if attempt > budget:
+        # Cleared runs restarted here and the popup STILL came back.
+        raise ScriptedAbort(
+            manual_msg + f" (auto-clear did not stick after {budget} attempts)",
+            terminal="cancelled",
+            reason="pending_transaction_popup",
+        )
+    ctx.scratch["pending_clear_attempt"] = attempt
+    ctx.log.record(
+        StepLog(
+            index=ctx.log.next_index(),
+            name="p3.pending_clear",
+            status=StepStatus.RETRIED,
+            attempt=attempt,
+            value=(
+                f"auto-clearing pending transaction "
+                f"(attempt {attempt}/{budget}, AI captcha)"
+            ),
+        )
+    )
+    await ctx.reporter.set_status(Status.PENDING_TRANSACTION)
+
+    # Every clear failure — including a step inside the flow raising (slow
+    # portal home, dead CDP context mid-poll) — must land in the ("failed",
+    # hint) contract so the budget below decides retry vs abort; an escaped
+    # exception would kill the run with a context-free message and waste the
+    # remaining budget on exactly the transient class this path absorbs.
+    try:
+        clear_status, hint = await pending_clear.clear_pending_transaction(ctx)
+    except ScriptedAbort as e:
+        clear_status, hint = "failed", e.message
+    except Exception as e:
+        clear_status, hint = "failed", f"{type(e).__name__}: {e}"
+    if clear_status == "cleared":
+        # open_portal's enter_status flips pendingTransaction back to
+        # aiAgentStarted (a legal FSM transition) on the rerun.
+        raise RestartFrom("open_portal", "pending transaction cleared")
+    if clear_status == "still_on_hold":
+        raise ScriptedAbort(
+            f"a pending transaction for {p.vehicleNumber} cannot be cleared "
+            "yet"
+            + (f" — the portal says retry after {hint}" if hint else "")
+            + "; try again later",
+            terminal="cancelled",
+            reason="pending_transaction_on_hold",
+        )
+    if attempt < budget:
+        raise RestartFrom(
+            "open_portal", f"pending clear failed ({hint[:60]}); retrying"
+        )
+    raise ScriptedAbort(
+        f"the pending transaction for {p.vehicleNumber} could not be cleared "
+        f"automatically ({hint}) — clear it via 'Check Pending Transaction' "
+        "under Border Tax Payment, then retry",
+        terminal="cancelled",
+        reason="pending_transaction_popup",
+    )
+
+
+# ─── Owner-info outcome probe ────────────────────────────────────────────
+# Copied from the auto path's pending_clear.wait_for_owner_info_outcome. On
+# a pending_popup the caller routes into _handle_pending_transaction above.
 
 _OWNER_INFO_OUTCOME_JS = """
 (function() {
@@ -499,11 +852,20 @@ def make_open_portal(state_value: str, state_slug: str):
     `state_value` is the <option value> ("UK", "TN", ...)."""
 
     async def open_portal(ctx: RunContext) -> None:
-        await navigate(ctx.session, ENTRY_URL, log=ctx.log, name="p1.open_parivahan")
-        await wait_for_selector(
-            ctx.session,
+        try:
+            await navigate(
+                ctx.session, ENTRY_URL, log=ctx.log, name="p1.open_parivahan"
+            )
+        except ScriptedAbort as e:
+            await _route_popup_or_stall(
+                ctx,
+                name="p1.open_parivahan",
+                detail=e.message,
+                final_message=e.message,
+            )
+        await _wait_selector_or_restart(
+            ctx,
             SEL_STATE_DROPDOWN,
-            log=ctx.log,
             name="p1.wait_state_dropdown",
             timeout=40,
         )
@@ -514,10 +876,9 @@ def make_open_portal(state_value: str, state_slug: str):
             log=ctx.log,
             name=f"p1.select_state_{state_slug}",
         )
-        await wait_for_url(
-            ctx.session,
+        await _wait_url_or_restart(
+            ctx,
             "checkpostv4",
-            log=ctx.log,
             name="p1.wait_service_page",
             timeout=45,
         )
@@ -530,10 +891,9 @@ def make_open_portal(state_value: str, state_slug: str):
 
 
 async def select_service(ctx: RunContext) -> None:
-    await wait_for_selector(
-        ctx.session,
+    await _wait_selector_or_restart(
+        ctx,
         SEL_SERVICE_DROPDOWN,
-        log=ctx.log,
         name="p2.wait_service_dropdown",
         timeout=45,
     )
@@ -545,10 +905,9 @@ async def select_service(ctx: RunContext) -> None:
         name="p2.select_service",
     )
     await click_by_text(ctx.session, "Go", log=ctx.log, name="p2.click_go", tag="button")
-    await wait_for_url(
-        ctx.session,
+    await _wait_url_or_restart(
+        ctx,
         "taxCollectionOnline",
-        log=ctx.log,
         name="p2.wait_owner_info_page",
         timeout=45,
     )
@@ -561,10 +920,9 @@ async def select_service(ctx: RunContext) -> None:
 async def owner_info(ctx: RunContext) -> None:
     p = ctx.params
     ctx.scratch["is_manual_entry"] = False
-    await wait_for_selector(
-        ctx.session,
+    await _wait_selector_or_restart(
+        ctx,
         SEL_VEHICLE_INPUT,
-        log=ctx.log,
         name="p3.wait_vehicle_input",
         timeout=30,
     )
@@ -605,23 +963,13 @@ async def owner_info(ctx: RunContext) -> None:
             terminal="cancelled",
         )
     if outcome == "pending_popup":
-        # Scripted v1: no auto-clear. The web operator can clear it on the
-        # portal ("Check Pending Transaction" under Border Tax Payment) and
-        # re-run — that is exactly the old handover-family behavior. A restart
-        # cannot clear it either, but the popup budget is cheap and keeps the
-        # rule simple ("every blocking popup retries"); the final abort keeps
-        # this message + reason so the operator playbook is unchanged.
-        _blocked_popup_restart_or_abort(
-            ctx,
-            name="p3.owner_outcome",
-            popup_text="pending-transaction popup after Get Details",
-            final_message=(
-                f"a previous transaction for {p.vehicleNumber} is still pending "
-                "on the portal — clear it via 'Check Pending Transaction' under "
-                "Border Tax Payment, then retry"
-            ),
-            reason="pending_transaction_popup",
-        )
+        # A wizard restart can never clear a pending transaction, so (when
+        # SCRIPTED_AUTO_CLEAR_PENDING is on) clear it the way the fully
+        # automated path does — scripted.pending_clear drives "Check Pending
+        # Transaction" with an AI-solved captcha — and rerun the wizard on a
+        # clean slate. Budgeted so a portal that keeps re-raising the popup
+        # still terminates with the manual-clear operator instruction.
+        await _handle_pending_transaction(ctx)
 
     if outcome == "manual_entry":
         # VAHAN returned "No data found" — fetch the RC record on demand and
@@ -699,13 +1047,14 @@ async def owner_info(ctx: RunContext) -> None:
             terminal="cancelled",
         )
 
-    await click_by_text(ctx.session, "Next", log=ctx.log, name="p3.click_next", tag="button")
-    if SCRIPTED_NEXT_DELAY_SECS > 0:
-        await sleep_seconds(
-            SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p3.post_next_delay"
-        )
-    await abort_on_blocking_popup(ctx, "p3.post_next_popup_check")
-    await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p3.settle")
+    # Verified advance: the vehicle-info section (select#floatingPrmit) must
+    # actually render, or the Next is re-clicked / the wizard restarted —
+    # this is where "same page opens again" runs used to die on p4's wait.
+    await _click_next_verified(
+        ctx,
+        name="p3.click_next",
+        ready_selector=SEL_PERMIT_TYPE,
+    )
 
 
 # ─── Phase 4 (parameterized per state) ───────────────────────────────────
@@ -766,10 +1115,9 @@ def make_vehicle_info(
                 reason=e.reason,
             )
 
-        await wait_for_selector(
-            ctx.session,
+        await _wait_selector_or_restart(
+            ctx,
             SEL_PERMIT_TYPE,
-            log=ctx.log,
             name="p4.wait_vehicle_info_page",
             timeout=30,
         )
@@ -804,15 +1152,11 @@ def make_vehicle_info(
                     final_message=e.message,
                     reason=e.reason,
                 )
-            await click_by_text(
-                ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+            await _click_next_verified(
+                ctx,
+                name="p4.click_next",
+                ready_selector=SEL_TAX_FROM,
             )
-            if SCRIPTED_NEXT_DELAY_SECS > 0:
-                await sleep_seconds(
-                    SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p4.post_next_delay"
-                )
-            await abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
-            await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
             return
 
         # Vehicle Category — only when present-but-empty; first real option.
@@ -981,15 +1325,12 @@ def make_vehicle_info(
                     name="p4.fill_distance",
                 )
 
-        await click_by_text(
-            ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+        # Verified advance to the tax-info section (input#floatingTaxfrom).
+        await _click_next_verified(
+            ctx,
+            name="p4.click_next",
+            ready_selector=SEL_TAX_FROM,
         )
-        if SCRIPTED_NEXT_DELAY_SECS > 0:
-            await sleep_seconds(
-                SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p4.post_next_delay"
-            )
-        await abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
-        await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
 
     return vehicle_info
 
@@ -1011,6 +1352,7 @@ async def _select_tax_mode_with_offered(
 
     select_js = (
         "(function(sels, wantValue, wantText){"
+        "  var bestLabels=[];"
         "  for (var si=0; si<sels.length; si++){"
         "    var e=document.querySelector(sels[si]);"
         "    if(!(e instanceof HTMLSelectElement)) continue;"
@@ -1030,9 +1372,11 @@ async def _select_tax_mode_with_offered(
         "      return {ok:true, value:e.options[hitIdx].value,"
         "              text:(e.options[hitIdx].text||'').trim(), labels:labels};"
         "    }"
-        "    return {ok:false, labels:labels};"
+        # A miss on this candidate must NOT end the scan — later selectors
+        # in the candidate list may be the real (populated) control.
+        "    if(labels.length>bestLabels.length){ bestLabels=labels; }"
         "  }"
-        "  return {ok:false, labels:[]};"
+        "  return {ok:false, labels:bestLabels};"
         "})("
         + json.dumps(SEL_TAX_MODE_CANDIDATES)
         + ", "
@@ -1102,10 +1446,9 @@ def make_tax_info(
 
     async def tax_info(ctx: RunContext) -> None:
         p = ctx.params
-        await wait_for_selector(
-            ctx.session,
+        await _wait_selector_or_restart(
+            ctx,
             SEL_TAX_FROM,
-            log=ctx.log,
             name="p5.wait_tax_info_page",
             timeout=30,
         )
@@ -1186,14 +1529,14 @@ def make_tax_info(
         # Best-effort: never aborts; "0" sentinel lands in borderTaxAmount.
         await extract_and_save_border_tax_amount(ctx)
 
-        await click_by_text(
-            ctx.session, "Next", log=ctx.log, name="p5.click_next", tag="button"
+        # Verified advance onto the Disclaimer page (captcha + Pay Online) —
+        # the page the operator takes over. input#inputcap is safe as the
+        # marker on every state: the wizard DOM is identical through the
+        # Disclaimer step across all 8 (see module docstring).
+        await _click_next_verified(
+            ctx,
+            name="p5.click_next",
+            ready_selector=SEL_DISCLAIMER_CAPTCHA,
         )
-        if SCRIPTED_NEXT_DELAY_SECS > 0:
-            await sleep_seconds(
-                SCRIPTED_NEXT_DELAY_SECS, log=ctx.log, name="p5.post_next_delay"
-            )
-        await abort_on_blocking_popup(ctx, "p5.post_next_popup_check")
-        await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p5.settle")
 
     return tax_info
