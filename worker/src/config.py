@@ -77,6 +77,13 @@ AUTO_CLEAR_PENDING = _bool("AUTO_CLEAR_PENDING", "false")
 # AUTO_CLEAR_PENDING so the two paths can be toggled separately.
 SCRIPTED_AUTO_CLEAR_PENDING = _bool("SCRIPTED_AUTO_CLEAR_PENDING", "true")
 
+# Fully-automated path: TOTAL wizard attempts when a page STALLS pre-payment
+# (a selector/URL wait times out, or a Next click leaves the wizard on the
+# same section). 3 = first pass + up to 2 full restarts from the portal
+# landing page; then the run cancels with the stall message. Mirrors the
+# scripted path's stall budget (see tasks/border_tax/advance.py).
+AUTO_STALL_MAX_ATTEMPTS = int(os.environ.get("AUTO_STALL_MAX_ATTEMPTS", "3"))
+
 
 # Captcha solving policy (global). "ai" tries Vertex OCR first and SILENTLY
 # (no captcha image uploaded, no captcha status written) and falls back to the

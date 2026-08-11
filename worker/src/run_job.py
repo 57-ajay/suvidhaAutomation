@@ -163,6 +163,15 @@ async def amain(job_id: str, display: str) -> None:
             else:
                 params = BorderTaxParams.from_job(params_raw)
                 phases = resolve_phases(params.state)
+                # Stall recovery (tasks/border_tax/advance.py) restarts the
+                # wizard at most (AUTO_STALL_MAX_ATTEMPTS - 1) times, and a
+                # pending-transaction clear adds one more RestartFrom. Give
+                # the pipeline cap the full budget (+1 headroom) so its
+                # generic "portal kept blocking" abort can never pre-empt
+                # the runners' message-preserving ones.
+                from config import AUTO_STALL_MAX_ATTEMPTS
+
+                max_restarts = max(1, AUTO_STALL_MAX_ATTEMPTS) + 1
             await reporter.set_status(Status.AI_AGENT_STARTED)
 
         session = build_browser_session(display)

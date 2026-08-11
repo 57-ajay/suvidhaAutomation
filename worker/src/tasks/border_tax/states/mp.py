@@ -82,6 +82,7 @@ from ..payment_wait import (
 # reuse its proven phases and the two shared gateway selectors verbatim. MP
 # overrides only the phases noted in the module docstring. (No import cycle:
 # up.py never imports mp.py.)
+from ..advance import wait_selector_or_restart, wait_url_or_restart
 from .up import (
     PHASE_GAP_SECS,
     SEL_PG_DROPDOWN,
@@ -138,18 +139,17 @@ _MP_PAYMENT_CONFIG = PaymentCaptureConfig(
 
 async def open_portal(ctx: RunContext) -> None:
     await navigate(ctx.session, ENTRY_URL, log=ctx.log, name="p1.open_parivahan")
-    await wait_for_selector(
-        ctx.session,
+    await wait_selector_or_restart(
+        ctx,
         SEL_STATE_DROPDOWN,
-        log=ctx.log,
         name="p1.wait_state_dropdown",
         timeout=40,
     )
     await select_by_value(
         ctx.session, SEL_STATE_DROPDOWN, "MP", log=ctx.log, name="p1.select_state_mp"
     )
-    await wait_for_url(
-        ctx.session, "checkpostv4", log=ctx.log, name="p1.wait_service_page", timeout=45
+    await wait_url_or_restart(
+        ctx, "checkpostv4", name="p1.wait_service_page", timeout=45
     )
     await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p1.settle")
 

@@ -52,13 +52,11 @@ from engine.steps import (
     fill,
     get_select_value,
     navigate,
-    read_popup_state,
     read_popup_text,
     select_by_text,
     select_by_value,
     sleep_seconds,
     wait_for_selector,
-    wait_for_url,
 )
 from engine.types import (
     RestartFrom,
@@ -73,6 +71,12 @@ from redis_client import job_key
 
 import api_client
 from .. import pending_clear
+from ..advance import (
+    click_next_verified,
+    wait_fee_calculation,
+    wait_selector_or_restart,
+    wait_url_or_restart,
+)
 from ..captcha_user import solve_captcha
 from ..manual_entry import (
     dismiss_chassis_bug_popup,
@@ -123,83 +127,13 @@ GATEWAY_URL_MARKERS = ["etranspgi", "vahanpgi", "paymentgateway"]
 VALIDITY_KEYWORDS = ["INSURANCE", "FITNESS", "PUCC", "EXPIRED", "RENEW"]
 VALIDITY_CLOSE = "button.swal2-confirm, .modal-footer button, .swal-button--confirm"
 
-# The ONLY popups allowed to pass a post-submit check. Everything else is
-# treated as the portal blocking the wizard — the run ends as cancelled with
-# the popup's own text. Allowlist, not blocklist: the portal keeps inventing
-# new blockers ("ALL INDIA TOURIST PERMIT holder are not required to pay any
-# Fees and Taxes.") and an unknown popup must end the run with its message,
-# never stall into a selector timeout.
-BENIGN_POPUP_HINTS = ["RECEIPT VALID"]
-
-
-def _classify_popup(text: str) -> str:
-    """'benign' for the informational notes we dismiss, 'blocking' for
-    everything else (validity failures, no-tax-due, unknown errors)."""
-    up_text = (text or "").upper()
-    if any(h in up_text for h in BENIGN_POPUP_HINTS):
-        return "benign"
-    # A spurious "enter chassis no." popup is a known gov-site bug — click OK
-    # and continue. Benign UNLESS the popup is really a validity/pending blocker
-    # that merely happens to mention the chassis.
-    if "CHASSIS" in up_text and not any(
-        k in up_text
-        for k in ("INSURANCE", "FITNESS", "PUCC", "EXPIRED", "RENEW", "PENDING")
-    ):
-        return "benign"
-    return "blocking"
-
-
-async def _abort_on_blocking_popup(
-    ctx: RunContext, name: str, *, seconds: float = 3.5
-) -> None:
-    """The portal validates ON the Next/Calculate click and raises its popup
-    a beat later — so this watchdog runs right AFTER every submit. Any popup
-    that isn't explicitly benign ends the run as cancelled, carrying the
-    portal's own words (no money has moved at these steps)."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        st = await read_popup_state(ctx.session)
-        if st.get("present"):
-            text = (st.get("text") or "").strip()
-            if _classify_popup(text) == "benign":
-                ctx.log.record(
-                    StepLog(
-                        index=ctx.log.next_index(),
-                        name=name,
-                        status=StepStatus.OK,
-                        value=f"benign popup: {text[:80]}",
-                    )
-                )
-                await dismiss_popup(
-                    ctx.session, log=ctx.log, name=f"{name}.dismiss_benign"
-                )
-                await asyncio.sleep(0.5)
-                continue
-            ctx.log.record(
-                StepLog(
-                    index=ctx.log.next_index(),
-                    name=name,
-                    status=StepStatus.FAILED,
-                    value=f"error_icon={st.get('error')}",
-                    error=text[:300] or "(error popup with no text)",
-                )
-            )
-            await dismiss_popup(ctx.session, log=ctx.log, name=f"{name}.close")
-            raise ScriptedAbort(
-                "the portal blocked the request: "
-                + (text[:300] or "an error popup with no readable text"),
-                terminal="cancelled",
-            )
-        await asyncio.sleep(0.5)
-    ctx.log.record(
-        StepLog(
-            index=ctx.log.next_index(),
-            name=name,
-            status=StepStatus.OK,
-            value="no blocking popup",
-        )
-    )
-
+# Post-submit popup handling moved into the shared advance module:
+# click_next_verified / wait_fee_calculation classify popups on every poll
+# tick with the same allowlist rule (only "RECEIPT VALID" and the spurious
+# chassis-bug note are benign; everything else — validity failures, "ALL
+# INDIA TOURIST PERMIT holder are not required to pay any Fees and Taxes.",
+# unknown errors — aborts the run carrying the popup's own text, never
+# stalling into a selector timeout). See tasks/border_tax/advance.py.
 
 PHASE_GAP_SECS = 1.5
 PERMIT_SET_TIMEOUT_SECS = 15
@@ -382,27 +316,25 @@ _TICK_CONFIRM_CHECKBOX_JS = """
 
 async def open_portal(ctx: RunContext) -> None:
     await navigate(ctx.session, ENTRY_URL, log=ctx.log, name="p1.open_parivahan")
-    await wait_for_selector(
-        ctx.session,
+    await wait_selector_or_restart(
+        ctx,
         SEL_STATE_DROPDOWN,
-        log=ctx.log,
         name="p1.wait_state_dropdown",
         timeout=40,
     )
     await select_by_value(
         ctx.session, SEL_STATE_DROPDOWN, "UP", log=ctx.log, name="p1.select_state_up"
     )
-    await wait_for_url(
-        ctx.session, "checkpostv4", log=ctx.log, name="p1.wait_service_page", timeout=45
+    await wait_url_or_restart(
+        ctx, "checkpostv4", name="p1.wait_service_page", timeout=45
     )
     await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p1.settle")
 
 
 async def select_service(ctx: RunContext) -> None:
-    await wait_for_selector(
-        ctx.session,
+    await wait_selector_or_restart(
+        ctx,
         SEL_SERVICE_DROPDOWN,
-        log=ctx.log,
         name="p2.wait_service_dropdown",
         timeout=45,
     )
@@ -416,10 +348,9 @@ async def select_service(ctx: RunContext) -> None:
     await click_by_text(
         ctx.session, "Go", log=ctx.log, name="p2.click_go", tag="button"
     )
-    await wait_for_url(
-        ctx.session,
+    await wait_url_or_restart(
+        ctx,
         "taxCollectionOnline",
-        log=ctx.log,
         name="p2.wait_owner_info_page",
         timeout=45,
     )
@@ -432,10 +363,9 @@ async def owner_info(ctx: RunContext) -> None:
     # manual-entry flag must reflect THIS Get-Details outcome, never a prior one
     # (a stale True would make vehicle_info hand-fill a VAHAN-prefilled form).
     ctx.scratch["is_manual_entry"] = False
-    await wait_for_selector(
-        ctx.session,
+    await wait_selector_or_restart(
+        ctx,
         SEL_VEHICLE_INPUT,
-        log=ctx.log,
         name="p3.wait_vehicle_input",
         timeout=30,
     )
@@ -490,7 +420,7 @@ async def owner_info(ctx: RunContext) -> None:
             )
         if clear_status != "cleared":
             raise ScriptedAbort(
-                f"pending transaction could not be cleared ({hint.removesuffix("OKNoCancel")})",
+                f"pending transaction could not be cleared ({hint.removesuffix('OKNoCancel')})",
                 terminal="cancelled",
             )
         raise RestartFrom("open_portal", "pending transaction cleared")
@@ -578,11 +508,14 @@ async def owner_info(ctx: RunContext) -> None:
             terminal="cancelled",
         )
 
-    await click_by_text(
-        ctx.session, "Next", log=ctx.log, name="p3.click_next", tag="button"
+    # Verified advance: the vehicle-info section (select#floatingPrmit) must
+    # actually render, or Next is re-clicked / the wizard restarted — this is
+    # where "page element did not appear: select#floatingPrmit" runs died.
+    await click_next_verified(
+        ctx,
+        name="p3.click_next",
+        ready_selector=SEL_PERMIT_TYPE,
     )
-    await _abort_on_blocking_popup(ctx, "p3.post_next_popup_check")
-    await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p3.settle")
 
 
 async def vehicle_info(ctx: RunContext) -> None:
@@ -601,10 +534,9 @@ async def vehicle_info(ctx: RunContext) -> None:
         close_selector=VALIDITY_CLOSE,
     )
 
-    await wait_for_selector(
-        ctx.session,
+    await wait_selector_or_restart(
+        ctx,
         SEL_PERMIT_TYPE,
-        log=ctx.log,
         name="p4.wait_vehicle_info_page",
         timeout=30,
     )
@@ -633,11 +565,11 @@ async def vehicle_info(ctx: RunContext) -> None:
             name="p4.check_validity_after_manual_fill",
             close_selector=VALIDITY_CLOSE,
         )
-        await click_by_text(
-            ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+        await click_next_verified(
+            ctx,
+            name="p4.click_next",
+            ready_selector=SEL_TAX_FROM,
         )
-        await _abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
-        await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
         return
 
     # RC data sometimes pre-fills Permit Type; Service Type options are
@@ -716,17 +648,18 @@ async def vehicle_info(ctx: RunContext) -> None:
         close_selector=VALIDITY_CLOSE,
     )
 
-    await click_by_text(
-        ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+    # Verified advance to the tax-info section (input#floatingTaxfrom).
+    await click_next_verified(
+        ctx,
+        name="p4.click_next",
+        ready_selector=SEL_TAX_FROM,
     )
-    await _abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
-    await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
 
 
 async def tax_info(ctx: RunContext) -> None:
     p = ctx.params
-    await wait_for_selector(
-        ctx.session, SEL_TAX_FROM, log=ctx.log, name="p5.wait_tax_info_page", timeout=30
+    await wait_selector_or_restart(
+        ctx, SEL_TAX_FROM, name="p5.wait_tax_info_page", timeout=30
     )
 
     tax_mode_set = False
@@ -812,22 +745,27 @@ async def tax_info(ctx: RunContext) -> None:
         name="p5.click_calculate",
         tag="button",
     )
-    await _abort_on_blocking_popup(ctx, "p5.post_calculate_popup_check", seconds=6.0)
-    await sleep_seconds(4.0, log=ctx.log, name="p5.wait_calculation")
+    # Wait for the fee rows (popups classified inline) so the extract below
+    # reads the real amount and the first Next click sticks — the portal's
+    # server-side calculation regularly outlives a fixed wait, and until the
+    # table renders Next is a no-op ("page element did not appear:
+    # input#inputcap" was this transition dying downstream).
+    await wait_fee_calculation(ctx)
 
     # Best-effort: never aborts; "0" sentinel lands in borderTaxAmount.
     await extract_and_save_border_tax_amount(ctx)
 
-    await click_by_text(
-        ctx.session, "Next", log=ctx.log, name="p5.click_next", tag="button"
+    # Verified advance onto the Disclaimer page (captcha + Pay Online).
+    await click_next_verified(
+        ctx,
+        name="p5.click_next",
+        ready_selector=SEL_CAPTCHA_INPUT,
     )
-    await _abort_on_blocking_popup(ctx, "p5.post_next_popup_check")
-    await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p5.settle")
 
 
 async def disclaimer_captcha(ctx: RunContext) -> None:
-    await wait_for_selector(
-        ctx.session, SEL_CAPTCHA_INPUT, log=ctx.log, name="p6.wait_captcha", timeout=30
+    await wait_selector_or_restart(
+        ctx, SEL_CAPTCHA_INPUT, name="p6.wait_captcha", timeout=30
     )
 
     async def submit() -> bool:

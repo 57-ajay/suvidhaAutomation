@@ -120,12 +120,19 @@ from ..tax_dates import fill_tax_dates
 # phases (incl. sbiepay_upi) and the shared selectors/helpers verbatim. HP
 # overrides only the phases noted in the module docstring. (No import cycle:
 # up.py never imports hp.py.)
+from ..advance import (
+    click_next_verified,
+    wait_fee_calculation,
+    wait_selector_or_restart,
+    wait_url_or_restart,
+)
 from ..manual_entry import fill_vehicle_info_manual
 from .up import (
     PHASE_GAP_SECS,
     PERMIT_SET_TIMEOUT_SECS,
     VALIDITY_CLOSE,
     VALIDITY_KEYWORDS,
+    SEL_CAPTCHA_INPUT,
     SEL_PERMIT_TYPE,
     SEL_SERVICE_TYPE,
     SEL_TAX_FROM,
@@ -134,7 +141,6 @@ from .up import (
     SEL_PG_DROPDOWN,
     SEL_PG_SUBMIT,
     SEL_QR_IMG,
-    _abort_on_blocking_popup,
     _first_non_placeholder_option,
     select_service,
     owner_info,
@@ -190,18 +196,17 @@ _HP_PAYMENT_CONFIG = PaymentCaptureConfig(
 
 async def open_portal(ctx: RunContext) -> None:
     await navigate(ctx.session, ENTRY_URL, log=ctx.log, name="p1.open_parivahan")
-    await wait_for_selector(
-        ctx.session,
+    await wait_selector_or_restart(
+        ctx,
         SEL_STATE_DROPDOWN,
-        log=ctx.log,
         name="p1.wait_state_dropdown",
         timeout=40,
     )
     await select_by_value(
         ctx.session, SEL_STATE_DROPDOWN, "HP", log=ctx.log, name="p1.select_state_hp"
     )
-    await wait_for_url(
-        ctx.session, "checkpostv4", log=ctx.log, name="p1.wait_service_page", timeout=45
+    await wait_url_or_restart(
+        ctx, "checkpostv4", name="p1.wait_service_page", timeout=45
     )
     await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p1.settle")
 
@@ -252,11 +257,11 @@ async def vehicle_info(ctx: RunContext) -> None:
             name="p4.check_validity_after_manual_fill",
             close_selector=VALIDITY_CLOSE,
         )
-        await click_by_text(
-            ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+        await click_next_verified(
+            ctx,
+            name="p4.click_next",
+            ready_selector=SEL_TAX_FROM,
         )
-        await _abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
-        await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
         return
 
     # HP's RC pre-fills most fields; the spec is "keep a filled value, set only
@@ -378,17 +383,18 @@ async def vehicle_info(ctx: RunContext) -> None:
 
     # NOTE: HP has NO Distance field (unlike HR). Nothing to fill here.
 
-    await click_by_text(
-        ctx.session, "Next", log=ctx.log, name="p4.click_next", tag="button"
+    # Verified advance to the tax-info section (input#floatingTaxfrom).
+    await click_next_verified(
+        ctx,
+        name="p4.click_next",
+        ready_selector=SEL_TAX_FROM,
     )
-    await _abort_on_blocking_popup(ctx, "p4.post_next_popup_check")
-    await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p4.settle")
 
 
 async def tax_info(ctx: RunContext) -> None:
     p = ctx.params
-    await wait_for_selector(
-        ctx.session, SEL_TAX_FROM, log=ctx.log, name="p5.wait_tax_info_page", timeout=30
+    await wait_selector_or_restart(
+        ctx, SEL_TAX_FROM, name="p5.wait_tax_info_page", timeout=30
     )
 
     # Tax Mode — match by visible text first (UP-style), fall back to HP's
@@ -493,17 +499,19 @@ async def tax_info(ctx: RunContext) -> None:
         name="p5.click_calculate",
         tag="button",
     )
-    await _abort_on_blocking_popup(ctx, "p5.post_calculate_popup_check", seconds=6.0)
-    await sleep_seconds(4.0, log=ctx.log, name="p5.wait_calculation")
+    # Wait for the fee rows (popups classified inline) so the extract below
+    # reads the real amount and the first Next click sticks.
+    await wait_fee_calculation(ctx)
 
     # Best-effort amount capture; never aborts (writes a "0" sentinel on miss).
     await extract_and_save_border_tax_amount(ctx)
 
-    await click_by_text(
-        ctx.session, "Next", log=ctx.log, name="p5.click_next", tag="button"
+    # Verified advance onto the Disclaimer page (captcha + Pay Online).
+    await click_next_verified(
+        ctx,
+        name="p5.click_next",
+        ready_selector=SEL_CAPTCHA_INPUT,
     )
-    await _abort_on_blocking_popup(ctx, "p5.post_next_popup_check")
-    await sleep_seconds(PHASE_GAP_SECS, log=ctx.log, name="p5.settle")
 
 
 async def payment_gateway(ctx: RunContext) -> None:
