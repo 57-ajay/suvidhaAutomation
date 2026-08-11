@@ -52,8 +52,14 @@ tax_info = make_tax_info(state_code="HR", tax_mode_values=_HR_TAX_MODE_VALUES)
 
 HANDOVER_CONFIG = HandoverConfig(
     state_name="Haryana",
+    # Receipt-page-exclusive markers ONLY — no page before the receipt
+    # contains any of them, and the old "government of <state>" header
+    # marker broke silently twice: MP's receipt says "Transport Department
+    # MADHYA PRADESH" (no "Government of"), and UK's says "GOVERNMENT OF
+    # UTTRAKHAND" (the portal's own spelling, no second 'A') — both made
+    # every receipt time out despite being on screen (verified against
+    # real receipt PDFs, 2026-08-11).
     receipt_markers=[
-        "government of haryana",
         "checkpost tax e-receipt",
         "receipt no",
         "grand total",
