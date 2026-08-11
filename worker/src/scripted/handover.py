@@ -43,7 +43,7 @@ from datetime import datetime
 import api_client
 from config import WEB_HANDOVER_TIMEOUT_SECS
 from engine.pipeline import Phase
-from engine.steps import cdp_eval, page_text, sleep_seconds
+from engine.steps import cdp_eval, current_url, page_text, sleep_seconds
 from engine.types import RunContext, RunOutcome, StepLog, StepStatus
 from lifecycle.status import Status
 
@@ -90,9 +90,48 @@ _EXTRACT_JS = """
 """
 
 
-def _receipt_ready(markers: list[str], text: str) -> bool:
-    low = text.lower()
-    return bool(markers) and all(m.lower() in low for m in markers)
+# ─── Multi-signal receipt detection ──────────────────────────────────────
+# The old rule (ALL of config.receipt_markers must appear) was blinded by a
+# single string drifting: MP's receipt header dropped "Government of" and
+# UK's is spelled "UTTRAKHAND" by the portal itself — every receipt then
+# timed out WITH the receipt on screen. Detection now accepts several
+# independent 2-signal combinations, each receipt-page-exclusive (verified
+# against real UP/HR/PB/MP/HP/UK receipt PDFs, all tax modes sampled DAYS):
+#
+#   * a "Receipt No : <XX>R<digits>" extraction  + any receipt phrase
+#   * all three receipt phrases together (survives a receipt-no relabel)
+#   * the receipt ROUTE in the URL (#/public/reports/CustomerReceipt[Xx])
+#     + any receipt phrase (survives wholesale body-text redesign)
+#   * the legacy full marker set from config (backstop, unchanged behavior)
+#
+# A blank receipt shell (route loaded, data not rendered yet) matches
+# nothing and keeps polling — every accepting path needs page CONTENT.
+
+import re as _re
+
+_RECEIPT_NO_RX = _re.compile(r"receipt\s*no\.?\s*:?\s*[A-Z]{2,4}[0-9]{8,}", _re.I)
+_RECEIPT_PHRASES = [
+    "checkpost tax e-receipt",
+    "grand total",
+    "genuinity of the receipt",
+]
+_RECEIPT_URL_MARKER = "customerreceipt"
+
+
+def _receipt_signals(text: str, url: str, markers: list[str]) -> str | None:
+    """Return a short reason string when the page is a tax receipt, else None."""
+    low = (text or "").lower()
+    phrases = [p for p in _RECEIPT_PHRASES if p in low]
+    has_no = bool(_RECEIPT_NO_RX.search(text or ""))
+    if has_no and phrases:
+        return f"receipt_no+{phrases[0]}"
+    if len(phrases) == len(_RECEIPT_PHRASES):
+        return "all_receipt_phrases"
+    if _RECEIPT_URL_MARKER in (url or "").lower() and phrases:
+        return f"url+{phrases[0]}"
+    if markers and all(m.lower() in low for m in markers):
+        return "legacy_markers"
+    return None
 
 
 def _any_pattern(patterns: list[str], text: str) -> str | None:
@@ -313,14 +352,19 @@ def make_handover_phase(config: HandoverConfig) -> Phase:
                             )
                         )
                         break
-                    if _receipt_ready(config.receipt_markers, text):
+                    try:
+                        url = await current_url(ctx.session)
+                    except Exception:
+                        url = ""
+                    reason = _receipt_signals(text, url, config.receipt_markers)
+                    if reason:
                         receipt_seen = True
                         ctx.log.record(
                             StepLog(
                                 index=ctx.log.next_index(),
                                 name="handover.receipt_detected",
                                 status=StepStatus.OK,
-                                value=f"poll={poll}",
+                                value=f"poll={poll} via {reason}",
                             )
                         )
                         break

@@ -152,8 +152,29 @@ _SBI_REF_RX = re.compile(
 )
 
 
+# Multi-signal receipt detection. The old rule (ALL markers must appear) was
+# blinded by one string drifting — MP's receipt header dropped "Government
+# of" and UK's is spelled "UTTRAKHAND" by the portal itself. A receipt now
+# counts on any of several receipt-page-exclusive 2-signal combinations
+# (verified against real UP/HR/PB/MP/HP/UK receipt PDFs):
+#   * "Receipt No : <XX>R<digits>" + any receipt phrase
+#   * all three receipt phrases together (survives a receipt-no relabel)
+#   * the legacy full marker set from config (backstop, unchanged behavior)
+_RECEIPT_NO_RX = re.compile(r"receipt\s*no\.?\s*:?\s*[A-Z]{2,4}[0-9]{8,}", re.I)
+_RECEIPT_PHRASES = [
+    "checkpost tax e-receipt",
+    "grand total",
+    "genuinity of the receipt",
+]
+
+
 def _receipt_ready(markers: list[str], text: str) -> bool:
-    low = text.lower()
+    low = (text or "").lower()
+    phrases = [p for p in _RECEIPT_PHRASES if p in low]
+    if _RECEIPT_NO_RX.search(text or "") and phrases:
+        return True
+    if len(phrases) == len(_RECEIPT_PHRASES):
+        return True
     return bool(markers) and all(m.lower() in low for m in markers)
 
 
