@@ -29,10 +29,18 @@ captcha_user patch isn't applied). Exhaustion -> that department is skipped
 there is no client captcha UI on the challans doc — and can be enabled with
 CHALLAN_SETTLEMENT_HUMAN_CAPTCHA=true once one exists.
 
-"This number does not exist" -> that department is skipped (not_found). When
-it was the only / last department, the pipeline simply reaches finalize, which
-clears the flag and closes the run as `done` with the not-found noted in the
-summary.
+"This number does not exist" -> NOT a failure: the department has nothing for
+this vehicle, so every client challan routed to it is concluded to be with a
+PHYSICAL court. Those challans are saved as quotation { amount: null,
+physicalCourt: true } and the department closes as skipped (not_found). The
+same physical-court mark is written for a client challan that is absent from a
+department's results page, one the portal shows as "Transferred to Regular
+Court", and (in finalize) challans with no vcourts department at all. Challans
+the portal DOES show but as Paid / Disposed / Warrant / proceedings-pending
+get NO write — they exist on Virtual Courts, they just aren't settleable. And
+when a department page fails to load (no_response / timeout / captcha
+exhausted) nothing is written for its challans either: we could not conclude
+anything about them.
 """
 
 from __future__ import annotations
@@ -200,9 +208,11 @@ async def _start(ctx: RunContext) -> None:
     ctx.scratch["unmapped"] = unmapped  # client challans w/o dept
     ctx.scratch["requested_map"] = p.requested_map()  # norm id -> client string
     ctx.scratch["matched"] = set()  # norm ids we quoted
+    ctx.scratch["physical"] = set()  # norm ids marked physical-court (null quotation)
     ctx.scratch["dept_results"] = []  # per-dept result dicts
     ctx.scratch["saved_matched"] = 0
     ctx.scratch["saved_extra"] = 0
+    ctx.scratch["saved_physical"] = 0
 
     # Idempotent re-assert (the API already set it at enqueue) — also covers a
     # job fired straight from the ops dashboard.
@@ -241,6 +251,7 @@ def _dept_result(
     saved: int = 0,
     matched: int = 0,
     extra: int = 0,
+    physical: int = 0,
     dropped: int = 0,
 ) -> dict:
     return {
@@ -250,8 +261,63 @@ def _dept_result(
         "saved": saved,
         "matched": matched,
         "extra": extra,
+        "physical": physical,
         "dropped": dropped,
     }
+
+
+async def _save_quotations(ctx: RunContext, dept: str, records: list[dict]) -> dict:
+    """save_challan_quotations with one retry (transient API hiccups)."""
+    p: ChallanSettlementParams = ctx.params
+    resp = await api_client.save_challan_quotations(
+        job_id=ctx.job_id,
+        request_id=p.requestId,
+        driver_id=p.driverId,
+        vehicle_number=p.vehicleNumber,
+        department=dept,
+        records=records,
+    )
+    if not resp.get("ok"):
+        resp = await api_client.save_challan_quotations(
+            job_id=ctx.job_id,
+            request_id=p.requestId,
+            driver_id=p.driverId,
+            vehicle_number=p.vehicleNumber,
+            department=dept,
+            records=records,
+        )
+    return resp
+
+
+def _physical_records(ctx: RunContext, originals: list[str]) -> list[dict]:
+    """Physical-court save records (quotation amount null + physicalCourt flag)
+    for client challans concluded NOT to be on Virtual Courts. Skips anything
+    already quoted or already marked in an earlier phase."""
+    matched: set[str] = ctx.scratch.get("matched", set())
+    physical: set[str] = ctx.scratch.get("physical", set())
+    out: list[dict] = []
+    seen: set[str] = set()
+    for original in originals:
+        norm = normalize_id(original)
+        if norm in matched or norm in physical or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(
+            {
+                "challanId": original,  # client's ORIGINAL string == doc id
+                "amount": None,
+                "isExtra": False,
+                "physicalCourt": True,
+            }
+        )
+    return out
+
+
+def _record_physical_saved(ctx: RunContext, records: list[dict]) -> None:
+    marked: set[str] = ctx.scratch.setdefault("physical", set())
+    for rec in records:
+        marked.add(normalize_id(rec["challanId"]))
+    ctx.scratch["saved_physical"] = ctx.scratch.get("saved_physical", 0) + len(records)
 
 
 async def _department_inner(ctx: RunContext, dept: str, prefix: str) -> dict:
@@ -372,8 +438,32 @@ async def _department_inner(ctx: RunContext, dept: str, prefix: str) -> dict:
     text = await _page_text(ctx)
     if any(m in text for m in NOT_FOUND_MARKERS) and RESULTS_MARKER.lower() not in text:
         await _dismiss_modals(ctx, prefix)
-        return _dept_result(dept, "skipped", reason="not_found")
+        # "This number does not exist" == this department has NOTHING for the
+        # vehicle, so every client challan routed here is with a physical
+        # court: persist quotation { amount: null, physicalCourt: true }.
+        physical = _physical_records(ctx, ctx.scratch.get("plan", {}).get(dept, []))
+        if physical:
+            resp = await _save_quotations(ctx, dept, physical)
+            if not resp.get("ok"):
+                return _dept_result(
+                    dept,
+                    "failed",
+                    reason=f"physical_save_failed: {resp.get('error', 'unknown')}",
+                )
+            _record_physical_saved(ctx, physical)
+            for rec in physical:
+                _log(
+                    ctx,
+                    f"{prefix}.record",
+                    StepStatus.OK,
+                    value=f"{rec['challanId']} PHYSICAL-COURT (not on vcourts)",
+                )
+        return _dept_result(
+            dept, "skipped", reason="not_found", physical=len(physical)
+        )
     if RESULTS_MARKER.lower() not in text:
+        # Page never produced a decisive outcome (site failed to load / hung):
+        # we could not conclude anything, so NO physical-court marks here.
         return _dept_result(dept, "skipped", reason="no_response")
 
     await _dismiss_modals(ctx, prefix)  # results path: clear any leftover overlay
@@ -391,15 +481,16 @@ async def _department_inner(ctx: RunContext, dept: str, prefix: str) -> dict:
         f"[{', '.join(f'{k}:{v}' for k, v in breakdown.items())}]",
     )
 
-    if not valid:
-        reason = "0_records" if not raws else "no_settleable_records"
-        return _dept_result(dept, "skipped", reason=reason, dropped=len(dropped))
-
     # D — match against the client's list; build the save payload.
     #     matched  -> doc id = the client's ORIGINAL challan string,
     #                 payload { quotation only }
     #     extra    -> doc id = the portal's challan string,
     #                 payload { quotation + challanAmount (== settlement) }
+    #     physical -> requested challan ABSENT from this department's results,
+    #                 or shown as "Transferred to Regular Court": quotation
+    #                 { amount: null, physicalCourt: true }. Challans the
+    #                 portal DID show as Paid / Disposed / Warrant / pending
+    #                 get NO write — they are on vcourts, just not settleable.
     requested_map: dict[str, str] = ctx.scratch["requested_map"]
     records: list[dict] = []
     n_matched = n_extra = 0
@@ -428,24 +519,61 @@ async def _department_inner(ctx: RunContext, dept: str, prefix: str) -> dict:
             f"fine={rec.get('fine')} offence={rec.get('offence', '')[:60]}",
         )
 
-    # E — save (one retry).
-    resp = await api_client.save_challan_quotations(
-        job_id=ctx.job_id,
-        request_id=p.requestId,
-        driver_id=p.driverId,
-        vehicle_number=veh,
-        department=dept,
-        records=records,
-    )
-    if not resp.get("ok"):
-        resp = await api_client.save_challan_quotations(
-            job_id=ctx.job_id,
-            request_id=p.requestId,
-            driver_id=p.driverId,
-            vehicle_number=veh,
-            department=dept,
-            records=records,
+    # Physical-court determination for THIS department's requested challans:
+    # absent from the results entirely, or present but transferred to a
+    # regular court -> null quotation + physicalCourt. Any other drop reason
+    # (paid / disposed / warrant / pending / unreadable) -> leave untouched.
+    valid_norms = {normalize_id(r["challanId"]) for r in valid}
+    dropped_reasons: dict[str, str] = {}
+    for d in dropped:
+        norm = normalize_id(d.get("challanId") or "")
+        if norm and norm not in dropped_reasons:
+            dropped_reasons[norm] = d.get("reason", "")
+
+    physical: list[dict] = []
+    untouched: list[str] = []
+    for original in ctx.scratch.get("plan", {}).get(dept, []):
+        norm = normalize_id(original)
+        if norm in valid_norms or norm in ctx.scratch["matched"]:
+            continue
+        if norm in ctx.scratch["physical"]:
+            continue
+        drop_reason = dropped_reasons.get(norm)
+        if drop_reason is None or drop_reason == "skip_transferred_regular_court":
+            physical.append(
+                {
+                    "challanId": original,
+                    "amount": None,
+                    "isExtra": False,
+                    "physicalCourt": True,
+                }
+            )
+            _log(
+                ctx,
+                f"{prefix}.record",
+                StepStatus.OK,
+                value=f"{original} PHYSICAL-COURT "
+                f"({'transferred to regular court' if drop_reason else 'not on vcourts'})",
+            )
+        else:
+            untouched.append(f"{original}({drop_reason})")
+    if untouched:
+        _log(
+            ctx,
+            f"{prefix}.not_settleable",
+            StepStatus.OK,
+            value=f"on vcourts but not settleable, no write: {', '.join(untouched)}",
         )
+    records.extend(physical)
+
+    if not records:
+        # Nothing to quote AND nothing to mark physical (e.g. every requested
+        # challan here was shown but Paid/Disposed).
+        reason = "0_records" if not raws else "no_settleable_records"
+        return _dept_result(dept, "skipped", reason=reason, dropped=len(dropped))
+
+    # E — save (one retry).
+    resp = await _save_quotations(ctx, dept, records)
     if not resp.get("ok"):
         return _dept_result(
             dept,
@@ -458,12 +586,27 @@ async def _department_inner(ctx: RunContext, dept: str, prefix: str) -> dict:
 
     ctx.scratch["saved_matched"] += n_matched
     ctx.scratch["saved_extra"] += n_extra
+    _record_physical_saved(ctx, physical)
+    if not valid:
+        # Results page answered fine but held nothing settleable; the
+        # physical-court marks landed. Same legit-skip reasons as before so
+        # finalize's outcome mapping is unchanged.
+        reason = "0_records" if not raws else "no_settleable_records"
+        return _dept_result(
+            dept,
+            "skipped",
+            reason=reason,
+            saved=len(records),
+            physical=len(physical),
+            dropped=len(dropped),
+        )
     return _dept_result(
         dept,
         "confirmed",
         saved=len(records),
         matched=n_matched,
         extra=n_extra,
+        physical=len(physical),
         dropped=len(dropped),
     )
 
@@ -521,7 +664,35 @@ async def _finalize(ctx: RunContext) -> RunOutcome:
     skipped = [r for r in results if r["status"] == "skipped"]
     hard_skips = [r for r in skipped if not _is_legit_skip(r["reason"])]
 
-    not_quoted = [orig for norm, orig in requested_map.items() if norm not in matched]
+    # Unmapped challans have NO Virtual Courts department at all, so they are
+    # definitionally not settleable on vcourts: mark them physical-court too.
+    # Best-effort — a save failure here is noted in the summary but never
+    # blocks clearing the flag or closing the run.
+    physical: set[str] = ctx.scratch.setdefault("physical", set())
+    unmapped_failed = False
+    unmapped_records = _physical_records(ctx, unmapped)
+    if unmapped_records:
+        resp = await _save_quotations(ctx, "(no vcourts department)", unmapped_records)
+        if resp.get("ok"):
+            _record_physical_saved(ctx, unmapped_records)
+        else:
+            unmapped_failed = True
+        _log(
+            ctx,
+            "finalize.mark_unmapped_physical",
+            StepStatus.OK if resp.get("ok") else StepStatus.FAILED,
+            value=f"{len(unmapped_records)} challans",
+            error=None if resp.get("ok") else str(resp.get("error")),
+        )
+
+    marked_physical = [
+        orig for norm, orig in requested_map.items() if norm in physical
+    ]
+    not_quoted = [
+        orig
+        for norm, orig in requested_map.items()
+        if norm not in matched and norm not in physical
+    ]
 
     parts = [
         f"Challan settlement scan for {p.vehicleNumber}:",
@@ -529,10 +700,19 @@ async def _finalize(ctx: RunContext) -> RunOutcome:
         f"({ctx.scratch.get('saved_matched', 0)} requested + "
         f"{ctx.scratch.get('saved_extra', 0)} extra).",
     ]
+    if marked_physical:
+        parts.append(
+            f"Not in Virtual Courts, marked physical court (quotation null): "
+            f"{', '.join(marked_physical)}."
+        )
     if not_quoted:
         parts.append(f"No settlement found for: {', '.join(not_quoted)}.")
     if unmapped:
         parts.append(f"No Virtual Courts department for: {', '.join(unmapped)}.")
+    if unmapped_failed:
+        parts.append(
+            "WARNING: failed to save physical-court marks for the unmapped challans."
+        )
     for r in skipped:
         parts.append(f"[{r['department']}] skipped ({r['reason']}).")
     for r in failed:

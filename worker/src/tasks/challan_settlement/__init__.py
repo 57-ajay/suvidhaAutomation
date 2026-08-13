@@ -16,8 +16,10 @@ sibling of border-tax and PUC:
                          Proceed Now -> Challan/Vehicle No. tab -> fill VEHICLE
                          number -> solve the securimage captcha (AI OCR, silent;
                          no human fallback by default) -> Submit -> extract all
-                         records -> skip paid/transferred/disposed/warrant/
-                         pending -> save quotations via
+                         records -> skip paid/disposed/warrant/pending -> save
+                         quotations (plus null-amount physicalCourt marks for
+                         requested challans absent from the results or
+                         transferred to a regular court) via
                          /api/internal/challan-settlement/quotations.
                          Any failure inside a department marks THAT department
                          skipped/failed and the run continues.
@@ -27,10 +29,17 @@ sibling of border-tax and PUC:
 
 Data written (by the API, on the worker's behalf):
     challans/{VEH}                          aiCheckingSettlement flag + summary
-    challans/{VEH}/subChallans/{challanNo}  { quotation: { amount, at } }
+    challans/{VEH}/subChallans/{challanNo}  { quotation: { amount, physicalCourt, at } }
                                             + challanAmount at the root for
                                               challans the client did NOT send
                                               (extras discovered on vcourts).
+                                            amount is null + physicalCourt true
+                                              for requested challans concluded
+                                              NOT to be on Virtual Courts
+                                              (dept says "does not exist",
+                                              absent from results, transferred
+                                              to regular court, or no vcourts
+                                              department for the prefix).
 
 Never pays anything, never clicks "View" — read-only extraction. Payment is a
 separate task.
