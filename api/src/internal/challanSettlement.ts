@@ -7,7 +7,13 @@
 //       aiSettlementRequestedChallans / aiSettlementSummary
 //
 //   challans/{VEH}/subChallans/{challanNo}        (merge)
-//       quotation: { amount: number, at: Timestamp }
+//       quotation: { amount: number | null, physicalCourt: boolean, at: Timestamp }
+//           physicalCourt=true  -> the challan is NOT settleable on Virtual
+//                                  Courts (portal said "This number does not
+//                                  exist", the record is transferred to a
+//                                  regular court, or no vcourts department
+//                                  exists for its prefix). amount is null.
+//           physicalCourt=false -> normal quotation; amount = Proposed Fine.
 //       challanAmount: number        <- ONLY for "extra" challans the client
 //                                       did not send (found during the vcourts
 //                                       vehicle scan); equals the settlement.
@@ -135,8 +141,9 @@ export async function setChallanCheckingFlag(input: ChallanFlagInput) {
 
 export interface ChallanQuotationRecord {
     challanId: string; // subChallans doc id (client-original for matched, portal for extra)
-    amount: number;    // settlement (Proposed Fine)
+    amount: number | null; // settlement (Proposed Fine); null for physical-court marks
     isExtra?: boolean; // true -> also stamp challanAmount at the root
+    physicalCourt?: boolean; // true -> not settleable on Virtual Courts; amount forced null
 }
 
 export interface SaveChallanQuotationsInput {
@@ -160,7 +167,12 @@ export async function handleSaveChallanQuotations(input: SaveChallanQuotationsIn
     if (!records.length) return { ok: false, error: "records array required" };
 
     const dropped: { challanId: string; reason: string }[] = [];
-    const accepted: { challanId: string; amount: number; isExtra: boolean }[] = [];
+    const accepted: {
+        challanId: string;
+        amount: number | null;
+        isExtra: boolean;
+        physicalCourt: boolean;
+    }[] = [];
     const seen = new Set<string>();
 
     for (const r of records) {
@@ -169,14 +181,21 @@ export async function handleSaveChallanQuotations(input: SaveChallanQuotationsIn
             dropped.push({ challanId, reason: "invalid_challanId" });
             continue;
         }
-        const amount = toAmount(r?.amount);
-        if (amount === null || amount < 0) {
-            dropped.push({ challanId, reason: "invalid_amount" });
-            continue;
-        }
         const key = normalizeId(challanId);
         if (seen.has(key)) {
             dropped.push({ challanId, reason: "duplicate" });
+            continue;
+        }
+        if (r?.physicalCourt) {
+            // Physical-court mark: the challan has no settleable record on
+            // Virtual Courts. amount is always null and it is never an extra.
+            seen.add(key);
+            accepted.push({ challanId, amount: null, isExtra: false, physicalCourt: true });
+            continue;
+        }
+        const amount = toAmount(r?.amount);
+        if (amount === null || amount < 0) {
+            dropped.push({ challanId, reason: "invalid_amount" });
             continue;
         }
         seen.add(key);
@@ -188,7 +207,7 @@ export async function handleSaveChallanQuotations(input: SaveChallanQuotationsIn
                 `dept=${input.department ?? "?"} job=${input.jobId ?? "?"}`,
             );
         }
-        accepted.push({ challanId, amount, isExtra: !!r?.isExtra });
+        accepted.push({ challanId, amount, isExtra: !!r?.isExtra, physicalCourt: false });
     }
 
     if (!accepted.length) {
@@ -201,7 +220,11 @@ export async function handleSaveChallanQuotations(input: SaveChallanQuotationsIn
         for (const rec of accepted) {
             const payload: Record<string, unknown> = {
                 quotation: {
-                    amount: rec.amount,
+                    amount: rec.amount, // null for physical-court marks
+                    // Written explicitly in BOTH states: set(..., {merge:true})
+                    // deep-merges maps, so omitting the flag on a later real
+                    // quotation would leave a stale physicalCourt:true behind.
+                    physicalCourt: rec.physicalCourt,
                     at: FieldValue.serverTimestamp(),
                 },
             };
@@ -219,7 +242,8 @@ export async function handleSaveChallanQuotations(input: SaveChallanQuotationsIn
 
         console.log(
             `[challan-settlement] saved ${accepted.length} quotations ` +
-            `(${accepted.filter((r) => r.isExtra).length} extra) vehicle=${veh} ` +
+            `(${accepted.filter((r) => r.isExtra).length} extra, ` +
+            `${accepted.filter((r) => r.physicalCourt).length} physical-court) vehicle=${veh} ` +
             `dept=${input.department ?? "?"} job=${input.jobId ?? "?"} ` +
             `dropped=${dropped.length}`,
         );

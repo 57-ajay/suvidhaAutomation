@@ -260,7 +260,9 @@ async def save_challan_quotations(
     task: str = "challan-settlement",
 ) -> dict:
     """Persist quotations under challans/{VEH}/subChallans/{challanId}.
-    records: [{"challanId": str, "amount": int, "isExtra": bool}]"""
+    records: [{"challanId": str, "amount": int | None, "isExtra": bool,
+               "physicalCourt": bool}] — amount None + physicalCourt True
+    marks a challan as not-on-Virtual-Courts (physical court)."""
     return await _post(
         "/api/internal/challan-settlement/quotations",
         {
