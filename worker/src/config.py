@@ -66,6 +66,13 @@ SCRIPTED_NEXT_DELAY_SECS = float(os.environ.get("SCRIPTED_NEXT_DELAY_SECS", "1.0
 # Pre-payment only: the wizard never restarts once human handover has begun.
 SCRIPTED_POPUP_MAX_ATTEMPTS = int(os.environ.get("SCRIPTED_POPUP_MAX_ATTEMPTS", "3"))
 
+# Scripted (web) path: AI-solve the Step-4 Disclaimer captcha (then Pay
+# Online -> Yes) BEFORE the human handover, so the operator starts on the
+# payment gateway and only picks the payment method and pays. Any failure
+# falls back to the old handover on the Disclaimer page (operator solves the
+# captcha). false = the old behavior exactly (see scripted/disclaimer_captcha.py).
+SCRIPTED_SOLVE_DISCLAIMER_CAPTCHA = _bool("SCRIPTED_SOLVE_DISCLAIMER_CAPTCHA", "true")
+
 # Pending-transaction auto-clear (Vertex-OCR background captcha). OFF by
 # default: a pending transaction then cancels with a clear retry message.
 AUTO_CLEAR_PENDING = _bool("AUTO_CLEAR_PENDING", "false")

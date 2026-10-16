@@ -246,6 +246,7 @@ async def capture_element_png(
     *,
     timeout: float = 10.0,
     tick: float = 0.7,
+    scale: int = 1,
 ) -> str | None:
     """Capture the LAST VISIBLE element matching the selector (the SBIePay
     QR <img>).
@@ -255,11 +256,19 @@ async def capture_element_png(
     sight is how half a QR reached the app. Once loaded, the pixels are read
     straight off the element bitmap (offscreen canvas at natural size), which
     involves no viewport geometry at all; only a cross-origin-tainted image
-    falls back to a document-absolute CDP clip."""
+    falls back to a document-absolute CDP clip.
+
+    scale > 1 is for OCR'd <img> captchas (the Get-Details "Verify Captcha"
+    box): the loaded image is redrawn `scale`x larger onto WHITE — the same
+    treatment the canvas captcha probe gives its bitmap — so the vision model
+    gets more pixels per glyph and never sees transparency. The default
+    scale=1 is the untouched exact-pixels path the QR and himkosh captures
+    rely on."""
     import json as _json
 
+    k = max(1, int(scale))
     expr = (
-        "(function(s){"
+        "(function(s, k){"
         "var els = Array.prototype.slice.call(document.querySelectorAll(s))"
         "  .filter(function(e){var r=e.getBoundingClientRect();"
         "          return r.width>0 && r.height>0;});"
@@ -269,8 +278,16 @@ async def capture_element_png(
         "  if(!e.complete || !e.naturalWidth) return {state:'loading'};"
         "  try{"
         "    var c=document.createElement('canvas');"
-        "    c.width=e.naturalWidth; c.height=e.naturalHeight;"
-        "    c.getContext('2d').drawImage(e, 0, 0);"
+        "    if(k > 1){"
+        "      c.width=e.naturalWidth*k; c.height=e.naturalHeight*k;"
+        "      var g=c.getContext('2d');"
+        "      g.fillStyle='#ffffff'; g.fillRect(0, 0, c.width, c.height);"
+        "      g.imageSmoothingEnabled=true; g.imageSmoothingQuality='high';"
+        "      g.drawImage(e, 0, 0, c.width, c.height);"
+        "    } else {"
+        "      c.width=e.naturalWidth; c.height=e.naturalHeight;"
+        "      c.getContext('2d').drawImage(e, 0, 0);"
+        "    }"
         "    return {state:'ok', dataUrl:c.toDataURL('image/png')};"
         "  }catch(err){ /* tainted: fall through to clip */ }"
         "}"
@@ -278,7 +295,7 @@ async def capture_element_png(
         "var r=e.getBoundingClientRect();"
         "return {state:'clip', rect:{x:r.x + window.scrollX,"
         "        y:r.y + window.scrollY, w:r.width, h:r.height}};"
-        "})(" + _json.dumps(selector) + ")"
+        "})(" + _json.dumps(selector) + ", " + str(k) + ")"
     )
     deadline = time.monotonic() + timeout
     while True:
