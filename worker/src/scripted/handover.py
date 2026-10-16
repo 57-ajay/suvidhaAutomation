@@ -4,13 +4,18 @@
 The wizard stops on the Disclaimer page (captcha + Pay Online — just BEFORE
 the payment gateway). This phase then:
 
+  0. Clears that page itself first (scripted.disclaimer_captcha): AI-solved
+     captcha -> "I confirm" -> Pay Online -> Yes, so the operator starts on
+     the payment gateway. Any miss falls back to the old start (operator
+     solves the captcha); SCRIPTED_SOLVE_DISCLAIMER_CAPTCHA=false skips it.
   1. Sets lifecycle status `humanHandover` (Firestore, via the reporter) and
      Redis job status `waiting_for_human` with a waitReason, so the ops
      console surfaces the job and the operator opens the live view.
-  2. The OPERATOR solves the captcha, clicks Pay Online, picks the payment
-     method on the gateway (UPI / net banking / whatever the state offers),
-     and completes the payment themselves. We never block on an explicit
-     human "done" — they may pay and never notify us.
+  2. The OPERATOR picks the payment method on the gateway (UPI / net
+     banking / whatever the state offers) — solving the captcha and clicking
+     Pay Online first only if step 0 couldn't — and completes the payment
+     themselves. We never block on an explicit human "done" — they may pay
+     and never notify us.
   3. Meanwhile this phase polls the page every few seconds, for up to
      WEB_HANDOVER_TIMEOUT_SECS (env, default 7 min), for either:
        - a NEGATIVE marker (portal says the transaction failed / is pending)
@@ -46,6 +51,8 @@ from engine.pipeline import Phase
 from engine.steps import cdp_eval, current_url, page_text, sleep_seconds
 from engine.types import RunContext, RunOutcome, StepLog, StepStatus
 from lifecycle.status import Status
+
+from . import disclaimer_captcha
 
 RECEIPT_POLL_INTERVAL_SECS = 4.0
 
@@ -298,17 +305,33 @@ async def _capture_and_upload_receipt(
 
 def make_handover_phase(config: HandoverConfig) -> Phase:
     """Build the human-handover phase for a state. The phase's max_secs is
-    the handover window + capture/upload headroom, so a config bump via env
-    never trips the pipeline watchdog."""
+    the disclaimer-captcha budget + the handover window + capture/upload
+    headroom, so neither a slow solve nor a config bump via env ever trips
+    the pipeline watchdog or eats into the operator's window."""
 
     async def human_handover(ctx: RunContext) -> RunOutcome:
         p = ctx.params
         timeout_secs = WEB_HANDOVER_TIMEOUT_SECS
+        # Step 0: clear the Disclaimer page (AI captcha -> Pay Online -> Yes)
+        # so the operator starts on the gateway. Never raises; anything short
+        # of "gateway" hands over as before.
+        captcha = await disclaimer_captcha.solve_before_handover(ctx)
+        if captcha == "gateway":
+            todo = (
+                "the captcha is already solved and Pay Online is done — pick "
+                "a payment method on the gateway and pay"
+            )
+        elif captcha == "disabled":
+            todo = "solve the captcha, pick a payment method, and pay"
+        else:
+            todo = (
+                "check the page: solve the captcha and click Pay Online if "
+                "they are still shown, then pick a payment method and pay"
+            )
         wait_reason = (
             f"Human handover: complete the border tax payment for vehicle "
             f"{p.vehicleNumber} entering {config.state_name} on the live "
-            f"view — solve the captcha, pick a payment method, and pay. "
-            f"{timeout_secs // 60} minutes."
+            f"view — {todo}. {timeout_secs // 60} minutes."
         )
         # Firestore -> humanHandover; Redis -> waiting_for_human + waitReason
         # in the same reporter call, so the console and the client see the
@@ -321,7 +344,10 @@ def make_handover_phase(config: HandoverConfig) -> Phase:
                 index=ctx.log.next_index(),
                 name="handover.entered",
                 status=StepStatus.OK,
-                value=f"timeout={timeout_secs}s state={config.state_name}",
+                value=(
+                    f"timeout={timeout_secs}s state={config.state_name} "
+                    f"disclaimer_captcha={captcha}"
+                ),
             )
         )
         print(
@@ -430,5 +456,8 @@ def make_handover_phase(config: HandoverConfig) -> Phase:
     return Phase(
         "human_handover",
         human_handover,
-        max_secs=WEB_HANDOVER_TIMEOUT_SECS + 180,
+        max_secs=(
+            int(disclaimer_captcha.SOLVE_BUDGET_SECS) + 30
+            + WEB_HANDOVER_TIMEOUT_SECS + 180
+        ),
     )

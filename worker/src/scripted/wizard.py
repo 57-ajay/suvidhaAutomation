@@ -17,6 +17,9 @@ Phase walk (each state builds its PHASES from these):
                    (factory: make_open_portal("UK")) -> URL gains "checkpostv4"
   select_service   "VEHICLE TAX COLLECTION (OTHER STATE)" + Go
   owner_info       vehicle + Get Details -> outcome poll (popups FIRST) ->
+                   [the portal's "Verify Captcha" box, when it shows: AI-
+                   solved by scripted.details_captcha, then the poll resumes
+                   on a fresh window] ->
                    district -> checkpost (exact -> case-insensitive -> FIRST
                    option, which naturally covers the old "first_option"
                    strategy states UK/TN/BR) -> Next.
@@ -40,7 +43,9 @@ Phase walk (each state builds its PHASES from these):
                    Calculate Fee/Tax; amount extraction (best-effort); Next.
 
 ...and the wizard stops there — the next phase is scripted.handover, which
-sets humanHandover and gives the browser to the operator on the live view.
+first AI-solves the Disclaimer captcha + Pay Online (scripted.disclaimer_captcha,
+falls back to the old start on any miss), then sets humanHandover and gives
+the browser to the operator on the live view.
 
 Blocking-popup retry: the portal's background validity fetches (insurance /
 fitness / PUCC / road tax) are flaky and throw spurious "renew your ..."
@@ -90,7 +95,7 @@ from engine.steps import (
 from engine.types import RestartFrom, RunContext, ScriptedAbort, StepLog, StepStatus
 from lifecycle.status import Status
 
-from . import pending_clear
+from . import details_captcha, pending_clear
 from .extract_amount import extract_and_save_border_tax_amount
 from .manual_entry import (
     dismiss_chassis_bug_popup,
@@ -751,7 +756,8 @@ async def _handle_pending_transaction(ctx: RunContext) -> None:
 
 # ─── Owner-info outcome probe ────────────────────────────────────────────
 # Copied from the auto path's pending_clear.wait_for_owner_info_outcome. On
-# a pending_popup the caller routes into _handle_pending_transaction above.
+# a pending_popup the caller routes into _handle_pending_transaction above;
+# on captcha_modal into scripted.details_captcha.
 
 _OWNER_INFO_OUTCOME_JS = """
 (function() {
@@ -761,6 +767,12 @@ _OWNER_INFO_OUTCOME_JS = """
     if (r.width <= 0 || r.height <= 0) continue;
     var text = (popups[i].textContent || '');
     var lower = text.toLowerCase();
+    // A captcha verdict ("Invalid Captcha", "Captcha expired") belongs to the
+    // Get-Details captcha box. Checked FIRST so it can never read as a
+    // validity blocker below ("expired").
+    if (lower.indexOf('captcha') !== -1) {
+      return {state: 'captcha_modal', text: text.substring(0, 240)};
+    }
     if (lower.indexOf('pending for verification') !== -1
         || (lower.indexOf('check pending transaction') !== -1
             && lower.indexOf('pending') !== -1)) {
@@ -783,6 +795,16 @@ _OWNER_INFO_OUTCOME_JS = """
       return {state: 'district_ready'};
     }
   }
+  // The Get-Details "Verify Captcha" box is up: the portal wants the code
+  // before it fetches the RC (after district on purpose — a rendered RC wins
+  // even if the box were slow to close).
+  var caps = document.querySelectorAll('input#inputVahanCap');
+  for (var c = 0; c < caps.length; c++) {
+    var cr = caps[c].getBoundingClientRect();
+    if (cr.width > 0 && cr.height > 0) {
+      return {state: 'captcha_modal'};
+    }
+  }
   return {state: 'pending'};
 })()
 """
@@ -796,9 +818,10 @@ async def _wait_for_owner_info_outcome(
     tick: float = OWNER_OUTCOME_POLL_TICK_SECS,
 ) -> str:
     """Poll after Get Details for one of: district_ready / manual_entry /
-    pending_popup / validity_popup / timeout. Never raises — the caller
-    branches. A spurious "enter chassis no." popup (a known gov-site bug) is
-    clicked away inline and polling continues."""
+    pending_popup / validity_popup / captcha_modal / timeout. Never raises —
+    the caller branches (captcha_modal: solve the box, then poll again on a
+    fresh window). A spurious "enter chassis no." popup (a known gov-site
+    bug) is clicked away inline and polling continues."""
     started = time.monotonic()
     deadline = started + timeout
     last_state, last_text = "pending", ""
@@ -820,6 +843,19 @@ async def _wait_for_owner_info_outcome(
                 )
             )
             return "district_ready"
+        if state == "captcha_modal":
+            ctx.log.record(
+                StepLog(
+                    index=ctx.log.next_index(),
+                    name=name,
+                    status=StepStatus.OK,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    value="captcha_modal"
+                    + (f": {(res or {}).get('text', '')[:120]}"
+                       if (res or {}).get("text") else ""),
+                )
+            )
+            return "captcha_modal"
         if state == "manual_entry":
             ctx.log.record(
                 StepLog(
@@ -939,6 +975,7 @@ async def select_service(ctx: RunContext) -> None:
 async def owner_info(ctx: RunContext) -> None:
     p = ctx.params
     ctx.scratch["is_manual_entry"] = False
+    details_captcha.reset_pass(ctx)  # every pass gets a fresh box + quota
     await _wait_selector_or_restart(
         ctx,
         SEL_VEHICLE_INPUT,
@@ -961,6 +998,14 @@ async def owner_info(ctx: RunContext) -> None:
     )
 
     outcome = await _wait_for_owner_info_outcome(ctx)
+    while outcome == "captcha_modal":
+        # The portal now gates the VAHAN fetch behind a "Verify Captcha" box.
+        # AI-solve it, then poll again on a fresh window for the real outcome
+        # (district / pending / validity / no-data — all routed below exactly
+        # as before). Bounded inside the solver: per-pass read, refresh and
+        # round caps, each ending in a wizard restart and finally a cancel.
+        await details_captcha.solve_details_captcha(ctx)
+        outcome = await _wait_for_owner_info_outcome(ctx)
 
     if outcome == "validity_popup":
         # Usually the portal's own background RC fetch failing, not a real

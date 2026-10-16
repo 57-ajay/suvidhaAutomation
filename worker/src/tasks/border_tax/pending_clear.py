@@ -89,6 +89,12 @@ _OWNER_INFO_OUTCOME_JS = """
     if (r.width <= 0 || r.height <= 0) continue;
     var text = (popups[i].textContent || '');
     var lower = text.toLowerCase();
+    // A captcha verdict ("Invalid Captcha", "Captcha expired") belongs to the
+    // Get-Details captcha box (details_captcha). Checked FIRST so it can never
+    // read as a validity blocker below ("expired").
+    if (lower.indexOf('captcha') !== -1) {
+      return {state: 'captcha_modal', text: text.substring(0, 240)};
+    }
     if (lower.indexOf('pending for verification') !== -1
         || (lower.indexOf('check pending transaction') !== -1
             && lower.indexOf('pending') !== -1)) {
@@ -109,6 +115,16 @@ _OWNER_INFO_OUTCOME_JS = """
     var rect = district.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       return {state: 'district_ready'};
+    }
+  }
+  // The Get-Details "Verify Captcha" box is up: the portal wants the code
+  // before it fetches the RC (after district on purpose — a rendered RC wins
+  // even if the box were slow to close).
+  var caps = document.querySelectorAll('input#inputVahanCap');
+  for (var c = 0; c < caps.length; c++) {
+    var cr = caps[c].getBoundingClientRect();
+    if (cr.width > 0 && cr.height > 0) {
+      return {state: 'captcha_modal'};
     }
   }
   return {state: 'pending'};
@@ -219,9 +235,10 @@ async def wait_for_owner_info_outcome(
     tick: float = OWNER_OUTCOME_POLL_TICK_SECS,
 ) -> str:
     """Poll after Get Details for one of: district_ready / manual_entry /
-    pending_popup / validity_popup / timeout. Never raises — the caller
-    branches. The popup text rides along in the StepLog so the run-log shows the
-    routing.
+    pending_popup / validity_popup / captcha_modal / timeout. Never raises —
+    the caller branches (captcha_modal: solve the box with details_captcha,
+    then poll again on a fresh window). The popup text rides along in the
+    StepLog so the run-log shows the routing.
 
     manual_entry = VAHAN had no RC data ("No data found for this vehicle
     number..") — the caller fetches the RC record on demand and fills the
@@ -250,6 +267,19 @@ async def wait_for_owner_info_outcome(
                 )
             )
             return "district_ready"
+        if state == "captcha_modal":
+            log.record(
+                StepLog(
+                    index=log.next_index(),
+                    name=name,
+                    status=StepStatus.OK,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    value="captcha_modal"
+                    + (f": {(res or {}).get('text', '')[:120]}"
+                       if (res or {}).get("text") else ""),
+                )
+            )
+            return "captcha_modal"
         if state == "manual_entry":
             log.record(
                 StepLog(
