@@ -11,5 +11,6 @@ export const JOB_TTL = 60 * 60 * 24; // jobs stay inspectable for 24h
 export const keys = {
     job: (jobId: string) => `job:${jobId}`,
     queue: "job:queue",
+    active: "job:active", // in-flight job ids; KEDA scales on queue + active
     allJobs: "jobs:all", // zset scored by createdAt ms
 } as const;

@@ -6,6 +6,10 @@
 // Jobs without a lease (pre-v5, or genuinely still in the queue) are never
 // touched. `terminalApplied=1` marks "already closed properly; reaper skips"
 // — the contract run_job.py already writes.
+//
+// The same pass prunes `job:active`. A worker LPUSHes a job there on pickup and
+// LREMs it when done; a SIGKILLed pod never LREMs, and KEDA counts that list, so
+// one stale entry would keep a worker node billing forever.
 
 import { redis, keys, JOB_TTL } from "./redis";
 import { handleJobCompleted } from "./internal/jobCompleted";
@@ -46,10 +50,27 @@ async function sweep(): Promise<void> {
             await finalizeZombie(id, now).catch((e) =>
                 console.error(`[sweeper] finalize failed for ${id}:`, e));
         }
+        await pruneActive(now);
     } catch (e) {
         console.error("[sweeper] pass failed:", e);
     } finally {
         sweeping = false;
+    }
+}
+
+// Stale = job hash gone, terminal, or its lease missing/expired. A live worker
+// leases before it marks active and refreshes every 30s, so a held job is
+// never pruned.
+async function pruneActive(now: number): Promise<void> {
+    const ids = await redis.lrange(keys.active, 0, -1);
+    for (const id of new Set(ids)) {
+        const [status, lease] = await redis.hmget(keys.job(id), "status", "leaseUntil");
+        const leaseAt = lease ? parseInt(lease, 10) : NaN;
+        const live = !!status && !TERMINAL.has(status) &&
+            Number.isFinite(leaseAt) && leaseAt >= now;
+        if (live) continue;
+        await redis.lrem(keys.active, 0, id);
+        console.log(`[sweeper] pruned stale active entry ${id} (status=${status ?? "gone"})`);
     }
 }
 

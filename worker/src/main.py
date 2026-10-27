@@ -22,7 +22,7 @@ import time
 import api_client
 from config import JOB_MAX_RUNTIME_SECS, JOB_TTL, MAX_SLOTS
 from lifecycle.status import PRE_PAYMENT, Status
-from redis_client import QUEUE_KEY, get_redis, job_key
+from redis_client import ACTIVE_KEY, QUEUE_KEY, get_redis, job_key
 from slots import SlotPool, live_url
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,11 +48,27 @@ def _on_sigterm(signum, frame):
     DRAIN.set()
 
 
+def _mark_active(r, job_id: str) -> None:
+    # LREM first so a re-enqueued id never sits in the list twice.
+    try:
+        r.pipeline().lrem(ACTIVE_KEY, 0, job_id).lpush(ACTIVE_KEY, job_id).execute()
+    except Exception as e:
+        print(f"[main] mark active failed for {job_id}: {e}")
+
+
+def _unmark_active(r, job_id: str) -> None:
+    try:
+        r.lrem(ACTIVE_KEY, 0, job_id)
+    except Exception as e:
+        print(f"[main] unmark active failed for {job_id}: {e}")
+
+
 def _tracked_handle_job(job_id, pool, r):
     global ACTIVE
     try:
         handle_job(job_id, pool, r)
     finally:
+        _unmark_active(r, job_id)
         with ACTIVE_LOCK:
             ACTIVE -= 1
 
@@ -139,7 +155,10 @@ def finalize_orphan(job_id: str, r) -> None:
 
 def handle_job(job_id: str, pool: SlotPool, r) -> None:
     key = job_key(job_id)
+    # Lease before the active mark: the API sweeper prunes active entries
+    # whose lease is missing or expired.
     _touch_lease(r, key)
+    _mark_active(r, job_id)
 
     slot = None
     while slot is None:
