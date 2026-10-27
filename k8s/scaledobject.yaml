@@ -1,3 +1,14 @@
+# Scale-to-zero worker. Desired pods = ceil((queued + in-flight) / 2), where 2
+# is the worker's MAX_SLOTS. Counting in-flight jobs (job:active, written by
+# the worker, pruned by the API sweeper) keeps a pod alive through a long
+# captcha / payment handover; only when both lists are empty for
+# cooldownPeriod does the fleet drop to 0, and the cluster autoscaler then
+# removes the empty worker node. The first job after idle waits ~2-4 min
+# (KEDA poll + node boot + image pull).
+#
+# scalingModifiers needs KEDA >= 2.12. On an older KEDA the field is dropped
+# and the two triggers combine as max(queued, in-flight) — still safe, just
+# a slower scale-up when a pod is full.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -5,12 +16,26 @@ metadata:
   namespace: suvidha
 spec:
   scaleTargetRef: { name: worker }
-  minReplicaCount: 1
-  maxReplicaCount: 3
+  minReplicaCount: 0
+  maxReplicaCount: 4
   pollingInterval: 15
+  cooldownPeriod: 300
+  advanced:
+    scalingModifiers:
+      formula: "queued + inflight"
+      target: "2"
+      activationTarget: "0"
+      metricType: AverageValue
   triggers:
     - type: redis
+      name: queued
       metadata:
         address: redis.suvidha.svc.cluster.local:6379
         listName: job:queue
-        listLength: "6"
+        listLength: "2"
+    - type: redis
+      name: inflight
+      metadata:
+        address: redis.suvidha.svc.cluster.local:6379
+        listName: job:active
+        listLength: "2"

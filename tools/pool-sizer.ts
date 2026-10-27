@@ -5,6 +5,7 @@
 //   bun tools/pool-sizer.ts room               # what can I still fit on core?
 //   bun tools/pool-sizer.ts plan --cpu 4       # print the sequence, change nothing
 //   bun tools/pool-sizer.ts create --cpu 4     # build green, cordoned. Blue untouched.
+//   bun tools/pool-sizer.ts plan --memory 6144 --shrink   # shrink, gated on live usage
 //   bun tools/pool-sizer.ts cutover            # THE OUTAGE. ~60s. redis PVC moves.
 //   bun tools/pool-sizer.ts rollback           # undo, whatever state we're in
 //   bun tools/pool-sizer.ts finish             # delete blue. The only irreversible verb.
@@ -21,15 +22,17 @@
 //      hang half-attached if the holder is deleted too soon after a drain
 //
 // WHAT THIS TOOL WILL NOT DO:
-//   - shrink anything (grow-only ratchet, every axis, no override flag)
-//   - touch worker-pool (KEDA owns it; tripwire #4: 12 slots <-> 12Gi <-> e2-standard-4)
+//   - shrink without --shrink, or past what the node is measurably USING: the
+//     target's modelled allocatable must hold today's busy memory under HEADROOM
+//   - touch worker-pool (KEDA owns it; tripwire #4: 2 slots <-> 2Gi <-> e2-highcpu-4)
 //   - run while jobs are in flight (queue must be empty, worker pods must be zero)
 //
 // Measured 2026-07-30, and the reason the shrink idea died: the core node is
 // 228m/1930m CPU (11% USED, 98% BOOKED) and 2746Mi memory USED. A 4GB node
 // allocates ~2890Mi — the live working set would have sat at 95% before anything
 // happened. Requests looked padded; usage says they are not. Size on busy,
-// schedule on booked, and never confuse the two again.
+// schedule on booked, and never confuse the two again. Hence --shrink re-measures
+// busy at plan/create time instead of trusting this note or anyone's guess.
 
 // knobs
 const PROJECT = "cabswale-ai";
@@ -124,6 +127,21 @@ function e2Custom(vcpu: number, memMib: number): string | { error: string } {
     if (per < 0.5 || per > 8)
         return { error: `E2 custom needs 0.5-8 GB per vCPU (got ${per.toFixed(2)})` };
     return `e2-custom-${vcpu}-${memMib}`;
+}
+
+// GKE's kube-reserved memory ladder + the 100Mi hard-eviction threshold. A model,
+// within ~100Mi; create still reads green's REAL allocatable before cutover.
+function gkeAllocMib(memMib: number): number {
+    if (memMib < 1024) return memMib - 255 - 100;
+    const tiers: [number, number][] = [[4096, 0.25], [4096, 0.2], [8192, 0.1], [114688, 0.06], [Infinity, 0.02]];
+    let left = memMib, reserved = 0;
+    for (const [size, frac] of tiers) {
+        const take = Math.min(left, size);
+        reserved += take * frac;
+        left -= take;
+        if (left <= 0) break;
+    }
+    return memMib - reserved - 100;
 }
 
 // Name carries the shape, so `kubectl get nodes` tells you what you're paying for.
@@ -376,11 +394,27 @@ function targetShape(argv: string[]): Shape {
     const vcpu = Number.isNaN(val("--cpu")) ? cur.vcpu : val("--cpu");
     const memMib = Number.isNaN(val("--memory")) ? cur.memMib : val("--memory");
 
-    // The ratchet. No override flag, deliberately.
+    // The ratchet. Shrinking needs --shrink AND must fit today's measured usage.
     if (vcpu < cur.vcpu || memMib < cur.memMib) {
-        console.error(`refusing to shrink: current ${cur.vcpu}c/${cur.memMib}Mi -> asked ${vcpu}c/${memMib}Mi`);
-        console.error(`This tool grows only. Shrink in the console, deliberately, if you truly mean it.`);
-        process.exit(1);
+        if (!argv.includes("--shrink")) {
+            console.error(`refusing to shrink: current ${cur.vcpu}c/${cur.memMib}Mi -> asked ${vcpu}c/${memMib}Mi`);
+            console.error(`Pass --shrink to size it against the node's live usage.`);
+            process.exit(1);
+        }
+        const bn = nodes().filter((n) => n.pool === st.blue);
+        const use = usage();
+        if (bn.some((n) => !use[n.name])) {
+            console.error(`refusing to shrink: no \`kubectl top\` reading for ${st.blue} — busy is unknown.`);
+            process.exit(1);
+        }
+        const busyMib = bn.reduce((a, n) => a + use[n.name]!.mem, 0) / 1024 ** 2;
+        const allocMib = gkeAllocMib(memMib);
+        console.log(`shrink check: busy ${busyMib.toFixed(0)}Mi vs ~${allocMib.toFixed(0)}Mi allocatable on ${vcpu}c/${memMib}Mi ` +
+            `(${pct(busyMib, allocMib)}, gate ${(HEADROOM * 100).toFixed(0)}%)`);
+        if (busyMib > allocMib * HEADROOM) {
+            console.error(`refusing to shrink: the live working set would not fit with headroom.`);
+            process.exit(1);
+        }
     }
     const name = vcpu === cur.vcpu && memMib === cur.memMib ? cur.name : e2Custom(vcpu, memMib);
     if (typeof name === "object") { console.error(name.error); process.exit(1); }
@@ -554,8 +588,8 @@ function cmdFinish(): void {
     saveState({ phase: "IDLE", note: `finished; core pool is now ${st.green}` });
     console.log(`\ndone. Paste into MEMORY.md §4:`);
     console.log(`  Cluster suvidha-cluster: \`${st.green}\` 1x ${describe(st.green)?.config?.machineType}`);
-    console.log(`  (autoscaling OFF, label ${CORE_LABEL}) · \`${WORKER_POOL}\` e2-standard-4,`);
-    console.log(`  autoscaling 0-3, label role=worker, taint dedicated=worker:NoSchedule`);
+    console.log(`  (autoscaling OFF, label ${CORE_LABEL}) · \`${WORKER_POOL}\` e2-highcpu-4,`);
+    console.log(`  autoscaling 0-4, label role=worker, taint dedicated=worker:NoSchedule`);
 }
 
 function cmdCheck(): void {
