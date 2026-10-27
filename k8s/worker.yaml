@@ -23,9 +23,11 @@ spec:
           env:
             - { name: REDIS_URL, value: "redis://redis:6379" }
             - { name: API_URL, value: "http://api:3000" }
-            # 2 slots <-> e2-highcpu-4 (4 vCPU / 4 GB, ~2.9 GB allocatable).
-            # Keep in lockstep with target/listLength in scaledobject.yaml.
-            - { name: MAX_SLOTS, value: "2" }
+            # 4 slots <-> e2-highcpu-4 (4 vCPU / 4 GB, ~2.9 GB allocatable).
+            # Challan jobs finish in 15-25s, so a burst is cheaper absorbed
+            # here than by booting a node. Keep in lockstep with
+            # target/listLength in scaledobject.yaml.
+            - { name: MAX_SLOTS, value: "4" }
             - { name: DOMAIN, value: "gkep.cabswale.in" }
             - {
                 name: POD_IP,
