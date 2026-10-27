@@ -22,8 +22,8 @@ spec:
           ports: [{ containerPort: 6379 }]
           volumeMounts: [{ name: data, mountPath: /data }]
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
-            limits: { memory: 1Gi }
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: redis-data }

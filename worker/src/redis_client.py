@@ -5,6 +5,11 @@ import redis
 from config import REDIS_URL
 
 QUEUE_KEY = "job:queue"
+# Jobs a worker has picked up and not yet finished. KEDA scales on
+# LLEN(job:queue) + LLEN(job:active), so the fleet can drop to zero only once
+# nothing is queued AND nothing is in flight. The API sweeper prunes entries
+# a dead pod left behind (see api/src/sweeper.ts).
+ACTIVE_KEY = "job:active"
 
 SOCKET_TIMEOUT_SECS = 15
 

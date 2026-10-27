@@ -27,8 +27,8 @@ spec:
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:
-            requests: { cpu: 250m, memory: 512Mi }
-            limits: { memory: 1Gi }
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
       volumes:
         - name: firebase-sa
           secret: { secretName: firebase-sa }

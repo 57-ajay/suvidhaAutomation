@@ -23,16 +23,20 @@ spec:
           env:
             - { name: REDIS_URL, value: "redis://redis:6379" }
             - { name: API_URL, value: "http://api:3000" }
-            - { name: MAX_SLOTS, value: "12" }
+            # 2 slots <-> 2Gi request <-> e2-highcpu-4 (4 vCPU / 4 GB, ~2.9 GB
+            # allocatable). Keep in lockstep with target/listLength in scaledobject.yaml.
+            - { name: MAX_SLOTS, value: "2" }
             - { name: DOMAIN, value: "gkep.cabswale.in" }
             - {
                 name: POD_IP,
                 valueFrom: { fieldRef: { fieldPath: status.podIP } },
               }
           volumeMounts: [{ name: dshm, mountPath: /dev/shm }]
+          # No CPU limit: the pod can burst to the node's full 4 vCPU.
           resources:
-            requests: { cpu: "3", memory: 12Gi }
-            limits: { memory: 13Gi }
+            requests: { cpu: "2", memory: 2Gi }
+            limits: { memory: 2560Mi }
       volumes:
+        # Memory-backed: counts against the 2560Mi limit above.
         - name: dshm
-          emptyDir: { medium: Memory, sizeLimit: 2Gi }
+          emptyDir: { medium: Memory, sizeLimit: 512Mi }
