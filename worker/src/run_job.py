@@ -152,26 +152,28 @@ async def amain(job_id: str, display: str) -> None:
 
                 params = ScriptedParams.from_job(params_raw)
                 phases = scripted_phases(params.state)
-                # The wizard runs THREE independently-budgeted restart
+                # The wizard runs FOUR independently-budgeted restart
                 # sources (each capped at SCRIPTED_POPUP_MAX_ATTEMPTS in
-                # ctx.scratch): blocking popups, page stalls, and
-                # pending-transaction clears. The pipeline cap is a backstop
-                # only — size it for the worst legitimate sum so the
+                # ctx.scratch): blocking popups, page stalls,
+                # pending-transaction clears, and the Get-Details captcha
+                # (scripted/details_captcha.py). The pipeline cap is a
+                # backstop only — size it for the worst legitimate sum so the
                 # pipeline's generic "portal kept blocking" abort can never
                 # pre-empt the wizard's message-preserving ones.
-                max_restarts = 3 * max(1, SCRIPTED_POPUP_MAX_ATTEMPTS)
+                max_restarts = 4 * max(1, SCRIPTED_POPUP_MAX_ATTEMPTS)
             else:
                 params = BorderTaxParams.from_job(params_raw)
                 phases = resolve_phases(params.state)
-                # Stall recovery (tasks/border_tax/advance.py) restarts the
-                # wizard at most (AUTO_STALL_MAX_ATTEMPTS - 1) times, and a
-                # pending-transaction clear adds one more RestartFrom. Give
-                # the pipeline cap the full budget (+1 headroom) so its
-                # generic "portal kept blocking" abort can never pre-empt
-                # the runners' message-preserving ones.
+                # Stall recovery (tasks/border_tax/advance.py) and the
+                # Get-Details captcha (tasks/border_tax/details_captcha.py)
+                # each restart the wizard at most (AUTO_STALL_MAX_ATTEMPTS - 1)
+                # times, and a pending-transaction clear adds one more
+                # RestartFrom. Give the pipeline cap the full budget (+1
+                # headroom) so its generic "portal kept blocking" abort can
+                # never pre-empt the runners' message-preserving ones.
                 from config import AUTO_STALL_MAX_ATTEMPTS
 
-                max_restarts = max(1, AUTO_STALL_MAX_ATTEMPTS) + 1
+                max_restarts = 2 * max(1, AUTO_STALL_MAX_ATTEMPTS)
             await reporter.set_status(Status.AI_AGENT_STARTED)
 
         session = build_browser_session(display)

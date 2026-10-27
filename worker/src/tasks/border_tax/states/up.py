@@ -8,7 +8,9 @@ ten portal steps, collapsed into our phase pipeline:
   select_service     "VEHICLE TAX COLLECTION (OTHER STATE)" + Go
                      -> URL gains "taxCollectionOnline"
   owner_info         vehicle + Get Details -> outcome poll (popups FIRST:
-                     pending / validity / district_ready / timeout) ->
+                     pending / validity / district_ready / timeout; the
+                     portal's "Verify Captcha" box, when it shows, is
+                     AI-solved by details_captcha and the poll resumes) ->
                      district (text, first-option fallback) -> checkpoint
                      (exact -> case-insensitive -> first) -> Next
   vehicle_info       validity checks before/after each field; Permit Type
@@ -70,7 +72,7 @@ from lifecycle.status import Status
 from redis_client import job_key
 
 import api_client
-from .. import pending_clear
+from .. import details_captcha, pending_clear
 from ..advance import (
     click_next_verified,
     wait_fee_calculation,
@@ -363,6 +365,7 @@ async def owner_info(ctx: RunContext) -> None:
     # manual-entry flag must reflect THIS Get-Details outcome, never a prior one
     # (a stale True would make vehicle_info hand-fill a VAHAN-prefilled form).
     ctx.scratch["is_manual_entry"] = False
+    details_captcha.reset_pass(ctx)  # every pass gets a fresh box + quota
     await wait_selector_or_restart(
         ctx,
         SEL_VEHICLE_INPUT,
@@ -389,6 +392,19 @@ async def owner_info(ctx: RunContext) -> None:
         ctx.log,
         name="p3.wait_owner_outcome",
     )
+    while outcome == "captcha_modal":
+        # The portal now gates the VAHAN fetch behind a "Verify Captcha" box.
+        # AI-solve it silently (never shown to the driver), then poll again on
+        # a fresh window for the real outcome (district / pending / validity /
+        # no-data — all routed below exactly as before). Bounded inside the
+        # solver: per-pass read, refresh and round caps, each ending in a
+        # wizard restart and finally a cancel.
+        await details_captcha.solve_details_captcha(ctx)
+        outcome = await pending_clear.wait_for_owner_info_outcome(
+            ctx.session,
+            ctx.log,
+            name="p3.wait_owner_outcome",
+        )
 
     if outcome == "validity_popup":
         raise ScriptedAbort(
