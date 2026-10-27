@@ -147,7 +147,8 @@ Sized for ~100 jobs/day (`suvidha-cluster`, `asia-south1-a`):
 
 - **worker-pool**: `e2-highcpu-4` (4 vCPU / 4 GB), autoscaling **0–4** nodes,
   label `role=worker`, taint `dedicated=worker:NoSchedule`, image streaming on.
-  One worker pod per node, `MAX_SLOTS=2` (8 concurrent jobs at max scale).
+  One worker pod per node, `MAX_SLOTS=4` (16 concurrent jobs at max scale);
+  a 2nd pod is added only when load holds for 60s.
 - **KEDA** (`k8s/scaledobject.yaml`) scales the worker on
   `job:queue` + `job:active` with **min 0**: the pod lives while anything is
   queued or in flight, then drops to 0 after 5 min idle; the cluster autoscaler
