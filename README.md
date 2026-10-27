@@ -146,8 +146,8 @@ pending-clear OCR (only used when `AUTO_CLEAR_PENDING=true`).
 Sized for ~100 jobs/day (`suvidha-cluster`, `asia-south1-a`):
 
 - **worker-pool**: `e2-highcpu-4` (4 vCPU / 4 GB), autoscaling **0–4** nodes,
-  label `role=worker`, taint `dedicated=worker:NoSchedule`. One worker pod per
-  node, `MAX_SLOTS=2` (8 concurrent jobs at max scale).
+  label `role=worker`, taint `dedicated=worker:NoSchedule`, image streaming on.
+  One worker pod per node, `MAX_SLOTS=2` (8 concurrent jobs at max scale).
 - **KEDA** (`k8s/scaledobject.yaml`) scales the worker on
   `job:queue` + `job:active` with **min 0**: the pod lives while anything is
   queued or in flight, then drops to 0 after 5 min idle; the cluster autoscaler
@@ -155,13 +155,16 @@ Sized for ~100 jobs/day (`suvidha-cluster`, `asia-south1-a`):
 - **core pool** (api/router/redis + kube-system + KEDA): always on. App
   requests are trimmed to ~125m CPU / 320Mi; shrink the node only through
   `bun tools/pool-sizer.ts plan --memory <MiB> --shrink`, which refuses unless
-  the node's *measured* usage fits the smaller shape.
+  the node's *measured* usage fits the smaller shape. Measured 2.83 GB busy on
+  `e2-standard-2` after the rollout: 4 GB won't fit, so it stays as is.
 
-Rollout, when nothing is in flight:
+Rollout, when nothing is in flight. Order matters: the worker must be the
+small one BEFORE the pool shrinks, or a 12Gi pod sits Pending on 4 GB nodes
+and the queue stalls.
 
 ```bash
-# 1. build + push api v10 and worker v15, bump the tags in k8s/, then:
-kubectl -n suvidha apply -f k8s/redis.yaml -f k8s/api.yaml -f k8s/router.yaml
+# 1. build + push the images, then the small worker and scale-to-zero
+kubectl -n suvidha apply -f k8s/api.yaml
 kubectl -n suvidha apply -f k8s/worker.yaml -f k8s/scaledobject.yaml
 
 # 2. once worker pods (and the worker node) are gone, reshape the empty pool
@@ -170,11 +173,15 @@ gcloud container node-pools update worker-pool $G --machine-type e2-highcpu-4
 gcloud container node-pools update worker-pool $G \
   --enable-autoscaling --min-nodes 0 --max-nodes 4
 
-# optional: faster cold starts (lazy-pulls the big worker image)
-gcloud container clusters update suvidha-cluster --zone asia-south1-a \
-  --project cabswale-ai --enable-image-streaming
+# faster cold starts (lazy-pulls the big worker image). Pool-level only: the
+# cluster-level flag can recreate the core node (api + redis restart).
+gcloud services enable containerfilesystem.googleapis.com --project cabswale-ai
+gcloud container node-pools update worker-pool $G --enable-image-streaming
 
-# 3. core pool: measure first, shrink only if the tool agrees
+# 3. redis + router (redis restarts; do it with the worker at 0)
+kubectl -n suvidha apply -f k8s/router.yaml -f k8s/redis.yaml
+
+# 4. core pool: measure first, shrink only if the tool agrees
 bun tools/pool-sizer.ts status
 bun tools/pool-sizer.ts plan --memory 6144 --shrink
 ```
